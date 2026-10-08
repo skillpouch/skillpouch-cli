@@ -14,7 +14,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
     let ctx = Context::load()?;
     let Some(command) = cli.command else {
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-            return tui::run(&ctx).await;
+            return tui::run(ctx).await;
         }
         return home::run(&ctx);
     };

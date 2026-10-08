@@ -1,4 +1,7 @@
-use crate::types::{CliAuthCreate, CliAuthCreated, CliAuthToken, DeviceTokens, Me};
+use crate::types::{
+    ArtifactList, CliAuthCreate, CliAuthCreated, CliAuthToken, DeviceList, DeviceTokens, Me,
+    PouchList,
+};
 use crate::{ApiError, Result};
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
@@ -93,9 +96,38 @@ impl Client {
     }
 
     pub async fn me(&self, key: &SignKey, access_token: &str) -> Result<Me> {
+        self.get("/v1/me", key, access_token).await
+    }
+
+    pub async fn pouches(&self, key: &SignKey, access_token: &str) -> Result<PouchList> {
+        self.get("/v1/pouches", key, access_token).await
+    }
+
+    pub async fn devices(&self, key: &SignKey, access_token: &str) -> Result<DeviceList> {
+        self.get("/v1/devices", key, access_token).await
+    }
+
+    /// The first `limit` (at most 200) live items of a pouch.
+    pub async fn artifacts(
+        &self,
+        key: &SignKey,
+        access_token: &str,
+        pouch_id: &str,
+        limit: u32,
+    ) -> Result<ArtifactList> {
+        let path = format!("/v1/pouches/{pouch_id}/artifacts?limit={limit}");
+        self.get(&path, key, access_token).await
+    }
+
+    async fn get<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        key: &SignKey,
+        access_token: &str,
+    ) -> Result<T> {
         self.send(Call {
             access_token: Some(access_token),
-            ..Call::new(Method::GET, "/v1/me", key)
+            ..Call::new(Method::GET, path, key)
         })
         .await
     }

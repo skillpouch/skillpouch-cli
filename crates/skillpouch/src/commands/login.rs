@@ -46,16 +46,88 @@ pub async fn run(
         ));
         println!();
     }
+    let via_token = token.is_some();
     let spinner = Spinner::start("Creating this computer's keys…");
+    let pending = begin(ctx, token, name).await;
+    spinner.clear();
+    let pending = pending?;
+
+    println!(
+        "{} {}\n",
+        ui::heading("Connecting"),
+        ui::accent(&pending.device_name)
+    );
+    if via_token {
+        step(1, "Approve it in the browser where you copied the command");
+    } else {
+        step(1, "Approve this computer in your browser");
+        println!("     {}", ui::accent(&pending.authorize_url));
+        if !no_browser && browser::open(&pending.authorize_url) {
+            println!("     {}", ui::dim("Opened it for you."));
+        }
+    }
+    println!();
+    step(2, "Check that the browser shows this code");
+    ui::code_box(&pending.code);
+    println!();
+
+    let spinner = Spinner::with_elapsed(format!(
+        "Waiting for approval {}",
+        ui::dim("· Ctrl+C to cancel")
+    ));
+    let approved = tokio::select! {
+        result = pending.wait(ctx) => {
+            spinner.clear();
+            result?
+        }
+        _ = tokio::signal::ctrl_c() => {
+            spinner.clear();
+            pending.cancel(ctx).await;
+            return Err(Exit::with_code(CANCELLED, "Login cancelled.", Some("Nothing was saved. Run `skillpouch login` to try again.")));
+        }
+    };
+    pending.save(ctx, approved)?;
+
+    ui::success(if replacing.is_some() {
+        "Logged in with new keys"
+    } else {
+        "Logged in"
+    });
+    println!();
+    let card = Card::new("This computer")
+        .row("Name", pending.device_name.as_str())
+        .row("Server", ctx.client.base())
+        .row("Keys", ui::dim(ctx.home.root().display()).to_string());
+    println!("{}", card.render(ui::width()));
+    println!();
+    if replacing.is_some() {
+        ui::hint("The old login still shows on your Devices page; remove it there.");
+    }
+    ui::hint("Run `skillpouch status` to see your account.");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// A login request waiting for the user to approve it in a browser.
+pub struct Pending {
+    sign: SignKey,
+    enc: EncKey,
+    verifier: String,
+    request_id: String,
+    expires_in: u64,
+    pub device_name: String,
+    pub authorize_url: String,
+    /// What the browser must show, e.g. `2605-3825`.
+    pub code: String,
+}
+
+/// Creates this computer's keys and opens a login request.
+pub async fn begin(ctx: &Context, token: Option<String>, name: Option<String>) -> Result<Pending> {
     let sign = SignKey::generate()?;
     let enc = EncKey::generate()?;
     let pkce = Pkce::generate()?;
     let sign_pub = sign.public_jwk()?;
     let enc_pub = enc.public_jwk()?;
-    let via_token = token.is_some();
     let device_name = device_name(name.or_else(|| ctx.config.device_name.clone()));
-
-    spinner.set_message(format!("Contacting {}…", ctx.client.base()));
     let request = ctx
         .client
         .create_login(
@@ -75,83 +147,60 @@ pub async fn run(
                 connect_token: token,
             },
         )
-        .await;
-    spinner.clear();
-    let request = request?;
+        .await?;
     let code = confirm_code(
         &request.request_id,
         &sign_pub,
         &enc_pub,
         &sign_pub.thumbprint(),
     );
+    Ok(Pending {
+        sign,
+        enc,
+        verifier: pkce.verifier,
+        request_id: request.request_id,
+        expires_in: request.expires_in,
+        device_name,
+        authorize_url: request.authorize_url,
+        code,
+    })
+}
 
-    println!(
-        "{} {}\n",
-        ui::heading("Connecting"),
-        ui::accent(&device_name)
-    );
-    if via_token {
-        step(1, "Approve it in the browser where you copied the command");
-    } else {
-        step(1, "Approve this computer in your browser");
-        println!("     {}", ui::accent(&request.authorize_url));
-        if !no_browser && browser::open(&request.authorize_url) {
-            println!("     {}", ui::dim("Opened it for you."));
-        }
+impl Pending {
+    /// Waits until the login is approved, denied or expires.
+    pub async fn wait(&self, ctx: &Context) -> Result<(DeviceTokens, String)> {
+        wait_for_approval(
+            ctx,
+            &self.sign,
+            &self.request_id,
+            &self.verifier,
+            self.expires_in,
+        )
+        .await
     }
-    println!();
-    step(2, "Check that the browser shows this code");
-    ui::code_box(&code);
-    println!();
 
-    let spinner = Spinner::with_elapsed(format!(
-        "Waiting for approval {}",
-        ui::dim("· Ctrl+C to cancel")
-    ));
-    let approved = tokio::select! {
-        result = wait_for_approval(ctx, &sign, &request.request_id, &pkce.verifier, request.expires_in) => {
-            spinner.clear();
-            result?
-        }
-        _ = tokio::signal::ctrl_c() => {
-            spinner.clear();
-            let _ = ctx.client.cancel_login(&sign, &request.request_id).await;
-            return Err(Exit::with_code(CANCELLED, "Login cancelled.", Some("Nothing was saved. Run `skillpouch login` to try again.")));
-        }
-    };
-    let (tokens, welcome) = approved;
-
-    Credentials {
-        format: Credentials::FORMAT,
-        api_url: ctx.client.base().to_string(),
-        device_id: tokens.device_id,
-        storage_account_id: tokens.storage_account_id,
-        sign_key: sign.to_b64(),
-        enc_key: enc.to_b64(),
-        refresh_token: tokens.refresh_token,
-        access_token: tokens.access_token,
-        access_expires_at: unix_now() + tokens.expires_in,
-        welcome,
+    /// Tells the server the user gave up; failing to is harmless (it expires).
+    pub async fn cancel(&self, ctx: &Context) {
+        let _ = ctx.client.cancel_login(&self.sign, &self.request_id).await;
     }
-    .save(&ctx.home)?;
 
-    ui::success(if replacing.is_some() {
-        "Logged in with new keys"
-    } else {
-        "Logged in"
-    });
-    println!();
-    let card = Card::new("This computer")
-        .row("Name", device_name.as_str())
-        .row("Server", ctx.client.base())
-        .row("Keys", ui::dim(ctx.home.root().display()).to_string());
-    println!("{}", card.render(ui::width()));
-    println!();
-    if replacing.is_some() {
-        ui::hint("The old login still shows on your Devices page; remove it there.");
+    /// Saves the approved login, replacing any earlier one.
+    pub fn save(&self, ctx: &Context, (tokens, welcome): (DeviceTokens, String)) -> Result<()> {
+        Credentials {
+            format: Credentials::FORMAT,
+            api_url: ctx.client.base().to_string(),
+            device_id: tokens.device_id,
+            storage_account_id: tokens.storage_account_id,
+            sign_key: self.sign.to_b64(),
+            enc_key: self.enc.to_b64(),
+            refresh_token: tokens.refresh_token,
+            access_token: tokens.access_token,
+            access_expires_at: unix_now() + tokens.expires_in,
+            welcome,
+        }
+        .save(&ctx.home)?;
+        Ok(())
     }
-    ui::hint("Run `skillpouch status` to see your account.");
-    Ok(ExitCode::SUCCESS)
 }
 
 fn step(number: u8, text: &str) {

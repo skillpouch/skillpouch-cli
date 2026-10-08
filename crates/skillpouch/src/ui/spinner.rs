@@ -36,10 +36,6 @@ impl Spinner {
         Self { bar }
     }
 
-    pub fn set_message(&self, message: impl Into<String>) {
-        self.bar.set_message(message.into());
-    }
-
     pub fn clear(self) {
         self.bar.finish_and_clear();
     }

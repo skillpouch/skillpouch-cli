@@ -1,0 +1,314 @@
+//! Drawing. Signed out (or logging in again): only the login screen.
+//! Signed in: a header with the tabs, the open tab, and a footer with keys
+//! and notices.
+
+mod login;
+mod pages;
+mod widgets;
+
+use crate::app::{App, Status, Tab};
+use crate::model::Tone;
+use crate::theme;
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Layout, Margin, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
+use widgets::{centered, keys, spinner};
+
+const BRAND: &str = "SkillPouch";
+/// Space between the name and the first tab, and between tabs; narrow
+/// terminals get the smaller gap.
+const TAB_GAP: usize = 4;
+const TAB_GAP_NARROW: usize = 2;
+
+pub fn draw(app: &App, frame: &mut Frame) {
+    let area = frame.area();
+    if let Some(login) = &app.login {
+        login::draw(app, login, frame, area);
+        draw_notice(app, frame, area);
+        return;
+    }
+    let [header, _, body, _, footer] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    draw_header(app, frame, header);
+    let body = body.inner(Margin::new(2, 0));
+    match app.tab {
+        Tab::Overview => pages::overview(app, frame, body),
+        Tab::Pouches => pages::pouches(app, frame, body),
+        Tab::Computers => pages::computers(app, frame, body),
+        Tab::Assistants => pages::assistants(app, frame, body),
+        Tab::Account => pages::account(app, frame, body),
+    }
+    draw_footer(app, frame, footer);
+    if app.confirm_logout {
+        draw_logout(frame, area);
+    }
+}
+
+fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
+    let [top, rule] = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+    let top = top.inner(Margin::new(2, 0));
+
+    let labels: usize = Tab::ALL.iter().map(|tab| tab.label().len()).sum();
+    let gap = if usize::from(top.width) >= BRAND.len() + labels + TAB_GAP * Tab::ALL.len() {
+        TAB_GAP
+    } else {
+        TAB_GAP_NARROW
+    };
+    let mut spans = vec![Span::styled(
+        BRAND,
+        theme::brand().add_modifier(Modifier::BOLD),
+    )];
+    let mut x = BRAND.len();
+    let mut underline = (0, 0);
+    for tab in Tab::ALL {
+        spans.push(Span::raw(" ".repeat(gap)));
+        x += gap;
+        let active = tab == app.tab;
+        if active {
+            underline = (x, tab.label().len());
+        }
+        spans.push(Span::styled(
+            tab.label(),
+            if active {
+                theme::strong()
+            } else {
+                theme::meta()
+            },
+        ));
+        x += tab.label().len();
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), top);
+
+    let mut right = match &app.status {
+        Status::Ready(dashboard) => vec![
+            Span::styled(dashboard.account.name.as_str(), theme::muted()),
+            Span::styled("  ·  ", theme::meta()),
+            Span::styled(dashboard.account.plan.as_str(), theme::accent()),
+        ],
+        Status::Loading => vec![Span::styled("Loading", theme::meta())],
+        Status::Failed(_) => vec![Span::styled("Offline", theme::error())],
+        Status::SignedOut => vec![],
+    };
+    if app.refreshing || matches!(app.status, Status::Loading) {
+        right.insert(0, Span::raw("  "));
+        right.insert(0, spinner(app.tick));
+    }
+    let right = Line::from(right);
+    if usize::from(top.width) >= x + right.width() + TAB_GAP {
+        frame.render_widget(Paragraph::new(right).right_aligned(), top);
+    }
+
+    // A thin rule, thicker and purple under the open tab.
+    let width = usize::from(rule.width);
+    let start = (underline.0 + 2).min(width);
+    let end = (start + underline.1).min(width);
+    let rule_line = Line::from(vec![
+        Span::styled("─".repeat(start), Style::new().fg(theme::BORDER)),
+        Span::styled("━".repeat(end - start), theme::brand()),
+        Span::styled("─".repeat(width - end), Style::new().fg(theme::BORDER)),
+    ]);
+    frame.render_widget(Paragraph::new(rule_line), rule);
+}
+
+fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
+    let area = area.inner(Margin::new(2, 0));
+    let mut pairs = vec![("tab", "switch")];
+    if !matches!(app.tab, Tab::Overview) {
+        pairs.push(("↑↓", "move"));
+    }
+    if app.tab == Tab::Account {
+        pairs.push(("enter", "select"));
+    }
+    pairs.extend([("o", "open in browser"), ("r", "refresh"), ("q", "quit")]);
+    frame.render_widget(Paragraph::new(keys(&pairs)), area);
+    draw_notice(app, frame, area);
+}
+
+/// The latest notice, right-aligned on the bottom row.
+fn draw_notice(app: &App, frame: &mut Frame, area: Rect) {
+    let Some(notice) = app.notice() else {
+        return;
+    };
+    let row = Rect {
+        y: area.bottom().saturating_sub(1),
+        height: 1,
+        ..area
+    }
+    .inner(Margin::new(2, 0));
+    let style = match notice.tone {
+        Tone::Success => theme::success(),
+        Tone::Info => theme::muted(),
+        Tone::Error => theme::error(),
+    };
+    frame.render_widget(
+        Clear,
+        Rect {
+            x: row
+                .right()
+                .saturating_sub(u16::try_from(notice.text.len()).unwrap_or(0)),
+            width: u16::try_from(notice.text.len()).unwrap_or(0).min(row.width),
+            ..row
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(Line::styled(notice.text.as_str(), style)).right_aligned(),
+        row,
+    );
+}
+
+fn draw_logout(frame: &mut Frame, area: Rect) {
+    let rect = centered(area, 60, 8);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme::BORDER_STRONG))
+        .padding(Padding::new(2, 2, 1, 0));
+    let lines = vec![
+        Line::styled("Log out of this computer?", theme::strong()),
+        Line::styled(
+            "Its keys are deleted. It stays on your Devices page.",
+            theme::meta(),
+        ),
+        Line::default(),
+        keys(&[("y", "log out"), ("n", "cancel")]),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
+        rect,
+    );
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::app::tests::{launch, ready};
+    use crate::model::{LoginStep, Update};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    pub fn screen(app: &App, width: u16, height: u16) -> String {
+        let Ok(mut terminal) = Terminal::new(TestBackend::new(width, height));
+        let _ = terminal.draw(|frame| draw(app, frame));
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(usize::from(width))
+            .map(|line| line.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn contains_all(text: &str, expected: &[&str]) {
+        for item in expected {
+            assert!(text.contains(item), "missing {item:?}:\n{text}");
+        }
+    }
+
+    #[test]
+    fn signed_out_shows_only_the_login_screen() {
+        let app = App::new(launch(), false);
+        let text = screen(&app, 100, 32);
+        contains_all(
+            &text,
+            &[
+                "▄█▀█▄",
+                "SkillPouch",
+                "Connect laptop",
+                "enter to log in",
+                "q quit",
+            ],
+        );
+        for absent in ["Overview", "Pouches", "Claude Code"] {
+            assert!(!text.contains(absent), "{absent} shown:\n{text}");
+        }
+    }
+
+    #[test]
+    fn the_login_screen_shows_the_link_and_the_code() {
+        let mut app = App::new(launch(), false);
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(screen(&app, 100, 32).contains("Creating this computer's keys"));
+        app.apply(Update::Login(LoginStep::Waiting {
+            url: "https://skillpouch.net/cli/authorize?request=abc".into(),
+            code: "2605-3825".into(),
+            computer: "laptop".into(),
+            opened: true,
+        }));
+        contains_all(
+            &screen(&app, 100, 32),
+            &[
+                "https://skillpouch.net/cli/authorize?request=abc",
+                "2605  3825",
+                "Waiting for approval",
+                "esc cancel",
+            ],
+        );
+        // Short terminals drop the pouch, not the code.
+        let short = screen(&app, 100, 20);
+        assert!(!short.contains("▄█▀█▄") && short.contains("2605  3825"));
+    }
+
+    #[test]
+    fn every_tab_draws() {
+        let mut app = ready();
+        let expected: [&[&str]; 5] = [
+            &[
+                "Welcome back, Ada",
+                "2 of 3",
+                "14",
+                "This computer",
+                "up to date",
+            ],
+            &["Pouch 1", "Locked", "12", "9 events behind", "3 min ago"],
+            &[
+                "desktop",
+                "Windows x86_64",
+                "2 days ago",
+                "this computer",
+                "1 trusted browser",
+            ],
+            &["Claude Code", "~/.claude", "Codex", "Not found", "1 of 2"],
+            &[
+                "ada@example.com",
+                "Log in again with new keys",
+                "Log out",
+                "2 of 3",
+            ],
+        ];
+        for (index, expected) in expected.iter().enumerate() {
+            app.tab = Tab::ALL[index];
+            let text = screen(&app, 110, 34);
+            contains_all(&text, expected);
+            contains_all(&text, &["SkillPouch", "Ada Lovelace", "Supporter"]);
+        }
+    }
+
+    #[test]
+    fn narrow_terminals_drop_the_account_name_not_the_tabs() {
+        let app = ready();
+        let text = screen(&app, 72, 30);
+        assert!(text.contains("Account") && !text.contains("Ada Lovelace  ·"));
+    }
+
+    #[test]
+    fn logout_asks_in_a_dialog() {
+        let mut app = ready();
+        app.confirm_logout = true;
+        contains_all(
+            &screen(&app, 110, 34),
+            &["Log out of this computer?", "y log out"],
+        );
+    }
+}

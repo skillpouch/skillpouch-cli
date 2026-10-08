@@ -36,21 +36,9 @@ pub fn shades(stderr: bool) -> [Style; 3] {
     ]
 }
 
-/// One cell of the traced logo. Without 24-bit colour the logo has a single
-/// colour, which the nearest 256-colour shade stands in for.
-pub fn glyph(glyph: &sp_tui::logo::Glyph, truecolor: bool) -> String {
-    let mut style = Style::new();
-    if let Some(fg) = glyph.fg {
-        style = if truecolor {
-            style.true_color(fg.0, fg.1, fg.2)
-        } else {
-            style.color256(98)
-        };
-    }
-    if let (Some(bg), true) = (glyph.bg, truecolor) {
-        style = style.on_true_color(bg.0, bg.1, bg.2);
-    }
-    style.apply_to(glyph.ch).to_string()
+/// The logo's purple.
+pub fn brand() -> Style {
+    rgb(sp_tui::logo::BRAND, 98, false)
 }
 
 pub fn accent<D: Display>(value: D) -> StyledObject<D> {

@@ -22,7 +22,8 @@ pub fn proof(key: &SignKey, input: &ProofInput<'_>) -> Result<String> {
     let mut claims = json!({
         "jti": uuid::Uuid::new_v4().to_string(),
         "htm": input.method,
-        "htu": input.url,
+        // The query and fragment are not part of `htu` (RFC 9449 §4.2).
+        "htu": input.url.split(['?', '#']).next().unwrap_or(input.url),
         "iat": input.issued_at,
     });
     if let Some(nonce) = input.nonce {
@@ -113,6 +114,24 @@ mod tests {
         assert!(claims.get("nonce").is_none() && claims.get("ath").is_none());
         // Every proof has its own jti.
         assert_ne!(token, proof(&key, &input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn the_url_is_signed_without_its_query() -> Result<()> {
+        let key = SignKey::generate()?;
+        let token = proof(
+            &key,
+            &ProofInput {
+                method: "GET",
+                url: "http://localhost/v1/pouches/p/artifacts?limit=200",
+                issued_at: 1,
+                nonce: None,
+                access_token: None,
+            },
+        )?;
+        let claims = token.split('.').nth(1).and_then(part).unwrap_or_default();
+        assert_eq!(claims["htu"], "http://localhost/v1/pouches/p/artifacts");
         Ok(())
     }
 }

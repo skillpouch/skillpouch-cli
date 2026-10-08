@@ -20,8 +20,10 @@ sp-api = { version = "0.1.0", path = "../sp-api" }
 sp-core = { version = "0.1.0", path = "../sp-core" }
 sp-crypto = { version = "0.1.0", path = "../sp-crypto" }
 sp-tui = { version = "0.1.0", path = "../sp-tui" }
-tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "signal", "time"] }
+time = { version = "0.3.55", features = ["parsing"] }
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
+serde = "1.0.229"
 tempfile = "3.27.0"
