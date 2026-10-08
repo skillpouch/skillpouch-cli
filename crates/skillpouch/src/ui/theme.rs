@@ -27,6 +27,11 @@ fn rgb(color: (u8, u8, u8), fallback: u8, stderr: bool) -> Style {
     }
 }
 
+/// The logo's purple.
+pub fn brand() -> Style {
+    rgb(ACCENT, 98, false)
+}
+
 /// The three purples, from light to dark, for gradients.
 pub fn shades(stderr: bool) -> [Style; 3] {
     [

@@ -52,31 +52,28 @@ pub fn commands(rows: &[(&str, &str)]) {
     }
 }
 
-/// The pouch mark beside the name and tagline, shaded light to dark.
+/// The SkillPouch pouch, traced from the logo at two pixels per cell, beside
+/// the name and tagline.
 pub fn banner(version: &str) {
-    const MARK: [&str; 5] = [
-        "   ▄▀▀▀▄   ",
-        "  ▀▄▄▄▄▄▀  ",
-        " ▄███████▄ ",
-        " █████████ ",
-        "  ▀█████▀  ",
+    const MARK: [&str; 9] = [
+        "    ▄█▀█▄  ▄█▀█▄    ",
+        "     ▀█▄█▀██▄█▀     ",
+        "     ██████████     ",
+        "   ▄████████████▄   ",
+        " ▄████████████████▄ ",
+        "████████████████████",
+        "████████████████████",
+        "▀██████████████████▀",
+        "  ▀▀████████████▀▀  ",
     ];
-    let [light, middle, dark] = shades(false);
-    let text = [
-        String::new(),
-        format!("{} {}", heading("SkillPouch"), dim(version)),
-        "Your skills, agents and MCP servers on every computer.".to_string(),
-        dim("End-to-end encrypted.").to_string(),
-        String::new(),
-    ];
+    let purple = theme::brand();
+    let mut text = vec![String::new(); MARK.len()];
+    text[3] = format!("{} {}", heading("SkillPouch"), dim(version));
+    text[4] = "Your skills, agents and MCP servers on every computer.".to_string();
+    text[5] = dim("End-to-end encrypted.").to_string();
     println!();
-    for (index, (mark, text)) in MARK.iter().zip(text).enumerate() {
-        let shade = match index {
-            0 | 1 => &light,
-            2 | 3 => &middle,
-            _ => &dark,
-        };
-        println!("  {}  {}", shade.apply_to(mark), text);
+    for (mark, text) in MARK.iter().zip(text) {
+        println!("  {}   {}", purple.apply_to(mark), text);
     }
     println!();
 }
