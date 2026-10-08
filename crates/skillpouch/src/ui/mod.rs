@@ -17,20 +17,20 @@ pub fn width() -> usize {
     usize::from(columns)
 }
 
-/// `✔ message`.
+/// `✔  message`. Two spaces: some terminals draw these symbols wide.
 pub fn success(message: impl AsRef<str>) {
-    println!("{} {}", theme::success("✔"), rich(message.as_ref(), false));
+    println!("{}  {}", theme::success("✔"), rich(message.as_ref(), false));
 }
 
 /// `› message`, for what to do next.
 pub fn hint(message: impl AsRef<str>) {
-    println!("{} {}", accent("›"), rich(message.as_ref(), false));
+    println!("{}  {}", accent("›"), rich(message.as_ref(), false));
 }
 
 /// `! message` in yellow.
 pub fn warn(message: impl AsRef<str>) {
     println!(
-        "{} {}",
+        "{}  {}",
         theme::warn("!"),
         theme::warn(rich(message.as_ref(), false))
     );
@@ -38,9 +38,9 @@ pub fn warn(message: impl AsRef<str>) {
 
 /// `✖ message` on stderr, with an optional `› hint` under it.
 pub fn error(message: impl AsRef<str>, hint: Option<&str>) {
-    eprintln!("{} {}", theme::error("✖"), rich(message.as_ref(), true));
+    eprintln!("{}  {}", theme::error("✖"), rich(message.as_ref(), true));
     if let Some(hint) = hint {
-        eprintln!("  {} {}", theme::accent_err("›"), rich(hint, true));
+        eprintln!("   {}  {}", theme::accent_err("›"), rich(hint, true));
     }
 }
 

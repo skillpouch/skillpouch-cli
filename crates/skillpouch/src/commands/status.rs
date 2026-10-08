@@ -63,7 +63,7 @@ fn print_human(ctx: &Context, me: &Me) {
     card = card
         .row(
             "Plan",
-            format!("{} {}", ui::accent("✦"), account.entitlements.plan_name),
+            format!("{}  {}", ui::accent("✦"), account.entitlements.plan_name),
         )
         .row(
             "Storage",

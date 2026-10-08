@@ -13,12 +13,12 @@ pub struct Spinner {
 
 impl Spinner {
     pub fn start(message: impl Into<String>) -> Self {
-        Self::styled(message, "{spinner} {msg}")
+        Self::styled(message, "{spinner}  {msg}")
     }
 
     /// Shows how long it has been spinning, for waits on the user.
     pub fn with_elapsed(message: impl Into<String>) -> Self {
-        Self::styled(message, "{spinner} {msg}  {elapsed:.dim}")
+        Self::styled(message, "{spinner}  {msg}  {elapsed:.dim}")
     }
 
     fn styled(message: impl Into<String>, template: &str) -> Self {
