@@ -1,5 +1,5 @@
-//! `skillpouch` on its own: the banner, whether this computer is connected,
-//! and the commands to try.
+//! `skillpouch` on its own outside an interactive terminal (pipes, scripts):
+//! the banner, whether this computer is connected, and the commands to try.
 
 use crate::context::{Context, VERSION};
 use crate::ui;

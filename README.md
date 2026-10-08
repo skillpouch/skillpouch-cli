@@ -8,6 +8,7 @@ The `skillpouch` command-line tool and background sync daemon.
 | `crates/sp-core/` | `~/.skillpouch` (or `$SKILLPOUCH_HOME`), `config.toml`, credentials, canonical JSON, assistant detection. |
 | `crates/sp-crypto/` | Device keys (P-256), DPoP proofs, PKCE, the login confirm code. |
 | `crates/sp-api/` | HTTP client for the API: envelope, DPoP nonces, typed calls. |
+| `crates/sp-tui/` | The terminal UI (ratatui) and the logo: a real picture where the terminal supports one (sixel, kitty, iTerm2), smoothed half-blocks elsewhere. |
 | `npm/skillpouch/` | The npm package `skillpouch` (`npx skillpouch …`). Today a placeholder; later a thin launcher for the native binary. |
 
 Server, web app and API contracts live in the separate `skillpouch` repository.
@@ -15,6 +16,7 @@ Server, web app and API contracts live in the separate `skillpouch` repository.
 ## Commands
 
 ```sh
+skillpouch                  # interactive terminal: the TUI; pipes and scripts: a summary
 skillpouch login [<connect-token>] [--name <name>] [--no-browser]
 skillpouch status [--json]
 skillpouch logout

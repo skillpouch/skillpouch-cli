@@ -19,6 +19,7 @@ serde_json = "1.0.151"
 sp-api = { version = "0.1.0", path = "../sp-api" }
 sp-core = { version = "0.1.0", path = "../sp-core" }
 sp-crypto = { version = "0.1.0", path = "../sp-crypto" }
+sp-tui = { version = "0.1.0", path = "../sp-tui" }
 tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "signal", "time"] }
 
 [dev-dependencies]

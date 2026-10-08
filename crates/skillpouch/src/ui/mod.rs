@@ -54,26 +54,24 @@ pub fn commands(rows: &[(&str, &str)]) {
 
 /// The SkillPouch pouch, traced from the logo at two pixels per cell, beside
 /// the name and tagline.
+/// Banner logo width in cells.
+const BANNER_COLUMNS: u16 = 20;
+
 pub fn banner(version: &str) {
-    const MARK: [&str; 9] = [
-        "    ▄█▀█▄  ▄█▀█▄    ",
-        "     ▀█▄█▀██▄█▀     ",
-        "     ██████████     ",
-        "   ▄████████████▄   ",
-        " ▄████████████████▄ ",
-        "████████████████████",
-        "████████████████████",
-        "▀██████████████████▀",
-        "  ▀▀████████████▀▀  ",
-    ];
-    let purple = theme::brand();
-    let mut text = vec![String::new(); MARK.len()];
-    text[3] = format!("{} {}", heading("SkillPouch"), dim(version));
-    text[4] = "Your skills, agents and MCP servers on every computer.".to_string();
-    text[5] = dim("End-to-end encrypted.").to_string();
+    let truecolor = console::colors_enabled() && console::true_colors_enabled();
+    let mark = sp_tui::logo::mark(BANNER_COLUMNS, truecolor);
+    let middle = mark.rows.len() / 2;
+    let mut text = vec![String::new(); mark.rows.len()];
+    text[middle - 1] = format!("{} {}", heading("SkillPouch"), dim(version));
+    text[middle] = "Your skills, agents and MCP servers on every computer.".to_string();
+    text[middle + 1] = dim("End-to-end encrypted.").to_string();
     println!();
-    for (mark, text) in MARK.iter().zip(text) {
-        println!("  {}   {}", purple.apply_to(mark), text);
+    for (row, text) in mark.rows.iter().zip(text) {
+        let cells: String = row
+            .iter()
+            .map(|glyph| theme::glyph(glyph, truecolor))
+            .collect();
+        println!("  {cells}   {text}");
     }
     println!();
 }

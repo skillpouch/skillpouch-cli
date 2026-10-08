@@ -22,7 +22,7 @@ pub async fn run(ctx: &Context, as_json: bool) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-async fn fetch_me(ctx: &Context, session: &mut crate::context::Session) -> Result<Me> {
+pub async fn fetch_me(ctx: &Context, session: &mut crate::context::Session) -> Result<Me> {
     let token = session.access_token(ctx, false).await?;
     let me = match ctx.client.me(&session.key, &token).await {
         // The server can end a token early (e.g. after a key rotation).
