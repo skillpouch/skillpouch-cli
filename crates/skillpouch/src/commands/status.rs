@@ -1,4 +1,5 @@
 use crate::context::{Context, signed_out};
+use crate::ui::{self, Card};
 use anyhow::Result;
 use serde_json::json;
 use sp_api::types::Me;
@@ -6,6 +7,22 @@ use std::process::ExitCode;
 
 pub async fn run(ctx: &Context, as_json: bool) -> Result<ExitCode> {
     let mut session = ctx.session()?;
+    let spinner = (!as_json).then(|| ui::Spinner::start("Checking your account…"));
+    let me = fetch_me(ctx, &mut session).await;
+    if let Some(spinner) = spinner {
+        spinner.clear();
+    }
+    let me = me?;
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&to_json(ctx, &me))?);
+    } else {
+        print_human(ctx, &me);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn fetch_me(ctx: &Context, session: &mut crate::context::Session) -> Result<Me> {
     let token = session.access_token(ctx, false).await?;
     let me = match ctx.client.me(&session.key, &token).await {
         // The server can end a token early (e.g. after a key rotation).
@@ -14,15 +31,8 @@ pub async fn run(ctx: &Context, as_json: bool) -> Result<ExitCode> {
             ctx.client.me(&session.key, &token).await
         }
         result => result,
-    }
-    .map_err(signed_out)?;
-
-    if as_json {
-        println!("{}", serde_json::to_string_pretty(&to_json(ctx, &me))?);
-    } else {
-        print_human(ctx, &me);
-    }
-    Ok(ExitCode::SUCCESS)
+    };
+    me.map_err(signed_out)
 }
 
 fn to_json(ctx: &Context, me: &Me) -> serde_json::Value {
@@ -38,19 +48,38 @@ fn to_json(ctx: &Context, me: &Me) -> serde_json::Value {
 }
 
 fn print_human(ctx: &Context, me: &Me) {
-    println!("Logged in as {} ({})", me.user.name, me.user.email);
-    if let Some(device) = &me.device {
-        println!("This computer  {}", device.name);
-    }
-    println!("Plan           {}", me.account.entitlements.plan_name);
-    println!(
-        "Storage        {} of {}",
-        bytes(me.account.used_bytes),
-        bytes(me.account.quota_bytes)
+    let account = &me.account;
+    let mut card = Card::new("SkillPouch").row(
+        "Signed in",
+        format!(
+            "{}  {}",
+            ui::heading(&me.user.name),
+            ui::dim(&me.user.email)
+        ),
     );
-    println!("Server         {}", ctx.client.base());
-    if let Some(date) = &me.account.delete_after {
-        println!("\nYour account is scheduled for deletion on {date}.");
+    if let Some(device) = &me.device {
+        card = card.row("Computer", device.name.as_str());
+    }
+    card = card
+        .row(
+            "Plan",
+            format!("{} {}", ui::accent("✦"), account.entitlements.plan_name),
+        )
+        .row(
+            "Storage",
+            format!(
+                "{}  {} {}",
+                ui::meter(account.used_bytes, account.quota_bytes, 16),
+                bytes(account.used_bytes),
+                ui::dim(format!("of {}", bytes(account.quota_bytes)))
+            ),
+        )
+        .row("Server", ui::dim(ctx.client.base()).to_string());
+    println!("{}", card.render(ui::width()));
+    if let Some(date) = &account.delete_after {
+        println!();
+        ui::warn(format!("Your account is scheduled for deletion on {date}."));
+        ui::hint("Cancel it from the banner in the web app.");
     }
 }
 

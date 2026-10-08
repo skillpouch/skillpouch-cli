@@ -1,3 +1,4 @@
+mod home;
 mod login;
 mod logout;
 mod status;
@@ -9,7 +10,10 @@ use std::process::ExitCode;
 
 pub async fn run(cli: Cli) -> Result<ExitCode> {
     let ctx = Context::load()?;
-    match cli.command {
+    let Some(command) = cli.command else {
+        return home::run(&ctx);
+    };
+    match command {
         Command::Login {
             token,
             name,

@@ -4,7 +4,8 @@
 use crate::browser;
 use crate::context::{Context, VERSION, unix_now};
 use crate::exit::{CANCELLED, Exit};
-use anyhow::{Result, bail};
+use crate::ui::{self, Card, Spinner};
+use anyhow::Result;
 use sp_api::types::{CliAuthCreate, CliAuthToken, DeviceTokens};
 use sp_core::home::user_home;
 use sp_core::{Credentials, assistants};
@@ -25,18 +26,26 @@ pub async fn run(
     no_browser: bool,
 ) -> Result<ExitCode> {
     if let Some(existing) = ctx.credentials()? {
-        bail!(
-            "This computer is already logged in to {}. Run `skillpouch logout` first.",
-            existing.api_url
-        );
+        return Err(Exit::failure(
+            format!(
+                "This computer is already logged in to {}.",
+                existing.api_url
+            ),
+            "Run `skillpouch logout` first to connect it again.",
+        ));
     }
     if token
         .as_deref()
         .is_some_and(|token| !is_connect_token(token))
     {
-        bail!("That doesn't look like a connect token (it starts with `sp_lt_`).");
+        return Err(Exit::failure(
+            "That doesn't look like a connect token.",
+            "Connect tokens start with sp_lt_. Copy the whole command from the web app.",
+        ));
     }
 
+    ui::banner(&format!("v{VERSION}"));
+    let spinner = Spinner::start("Creating this computer's keys…");
     let sign = SignKey::generate()?;
     let enc = EncKey::generate()?;
     let pkce = Pkce::generate()?;
@@ -45,6 +54,7 @@ pub async fn run(
     let via_token = token.is_some();
     let device_name = device_name(name.or_else(|| ctx.config.device_name.clone()));
 
+    spinner.set_message(format!("Contacting {}…", ctx.client.base()));
     let request = ctx
         .client
         .create_login(
@@ -64,7 +74,9 @@ pub async fn run(
                 connect_token: token,
             },
         )
-        .await?;
+        .await;
+    spinner.clear();
+    let request = request?;
     let code = confirm_code(
         &request.request_id,
         &sign_pub,
@@ -72,25 +84,38 @@ pub async fn run(
         &sign_pub.thumbprint(),
     );
 
+    println!(
+        "{} {}\n",
+        ui::heading("Connecting"),
+        ui::accent(&device_name)
+    );
     if via_token {
-        println!("Approve this computer in the browser where you copied the command.");
+        step(1, "Approve it in the browser where you copied the command");
     } else {
-        println!(
-            "Approve this computer in your browser:\n\n  {}\n",
-            request.authorize_url
-        );
+        step(1, "Approve this computer in your browser");
+        println!("     {}", ui::accent(&request.authorize_url));
         if !no_browser && browser::open(&request.authorize_url) {
-            println!("(Opened it for you.)");
+            println!("     {}", ui::dim("Opened it for you."));
         }
     }
-    println!("Confirmation code: {code}  — the browser must show the same code.");
-    println!("Waiting for approval… (Ctrl+C to cancel)");
+    println!();
+    step(2, "Check that the browser shows this code");
+    ui::code_box(&code);
+    println!();
 
+    let spinner = Spinner::with_elapsed(format!(
+        "Waiting for approval {}",
+        ui::dim("· Ctrl+C to cancel")
+    ));
     let approved = tokio::select! {
-        result = wait_for_approval(ctx, &sign, &request.request_id, &pkce.verifier, request.expires_in) => result?,
+        result = wait_for_approval(ctx, &sign, &request.request_id, &pkce.verifier, request.expires_in) => {
+            spinner.clear();
+            result?
+        }
         _ = tokio::signal::ctrl_c() => {
+            spinner.clear();
             let _ = ctx.client.cancel_login(&sign, &request.request_id).await;
-            return Err(Exit { code: CANCELLED, message: "Login cancelled.".into() }.into());
+            return Err(Exit::with_code(CANCELLED, "Login cancelled.", Some("Nothing was saved. Run `skillpouch login` to try again.")));
         }
     };
     let (tokens, welcome) = approved;
@@ -109,8 +134,20 @@ pub async fn run(
     }
     .save(&ctx.home)?;
 
-    println!("\nLogged in. This computer is \"{device_name}\" on your Devices page.");
+    ui::success("Logged in");
+    println!();
+    let card = Card::new("This computer")
+        .row("Name", device_name.as_str())
+        .row("Server", ctx.client.base())
+        .row("Keys", ui::dim(ctx.home.root().display()).to_string());
+    println!("{}", card.render(ui::width()));
+    println!();
+    ui::hint("Run `skillpouch status` to see your account.");
     Ok(ExitCode::SUCCESS)
+}
+
+fn step(number: u8, text: &str) {
+    println!("  {}  {}", ui::accent(number).bold(), text);
 }
 
 async fn wait_for_approval(
@@ -137,20 +174,26 @@ async fn wait_for_approval(
             }
             Err(error) => {
                 return Err(match error.code() {
-                    Some("cli_auth_denied") => {
-                        anyhow::anyhow!("The login was denied in the browser.")
-                    }
-                    Some("cli_auth_expired") => {
-                        anyhow::anyhow!("The login request expired. Run `skillpouch login` again.")
-                    }
+                    Some("cli_auth_denied") => Exit::failure(
+                        "The login was denied in the browser.",
+                        "If that wasn't you, nothing else is needed. Otherwise run `skillpouch login` again.",
+                    ),
+                    Some("cli_auth_expired") => expired(),
                     _ => error.into(),
                 });
             }
         }
         if unix_now() >= deadline {
-            bail!("The login request expired. Run `skillpouch login` again.");
+            return Err(expired());
         }
     }
+}
+
+fn expired() -> anyhow::Error {
+    Exit::failure(
+        "The login request expired.",
+        "Run `skillpouch login` again.",
+    )
 }
 
 fn is_connect_token(token: &str) -> bool {

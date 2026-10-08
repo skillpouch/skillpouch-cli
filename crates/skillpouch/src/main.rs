@@ -3,6 +3,7 @@ mod cli;
 mod commands;
 mod context;
 mod exit;
+mod ui;
 
 use clap::Parser;
 use std::process::ExitCode;

@@ -39,10 +39,10 @@ impl Context {
 
     pub fn session(&self) -> Result<Session> {
         let credentials = self.credentials()?.ok_or_else(|| {
-            Exit::not_logged_in(format!(
-                "Not logged in to {}. Run `skillpouch login`.",
-                self.client.base()
-            ))
+            Exit::not_logged_in(
+                format!("Not logged in to {}.", self.client.base()),
+                "Run `skillpouch login` to connect this computer.",
+            )
         })?;
         let key = SignKey::from_b64(&credentials.sign_key).context(
             "the saved device key is damaged; run `skillpouch logout`, then log in again",
@@ -75,15 +75,17 @@ impl Session {
     }
 }
 
+const RECONNECT: &str = "Run `skillpouch logout`, then `skillpouch login`.";
+
 /// Turns "this device can't sign in any more" into exit code 3.
 pub fn signed_out(error: ApiError) -> anyhow::Error {
     match error.code() {
-        Some("device_revoked") => Exit::not_logged_in(
-            "This computer was removed from your account. Run `skillpouch logout`, then `skillpouch login`.",
-        ),
-        Some("refresh_invalid" | "refresh_reused" | "member_inactive") => Exit::not_logged_in(
-            "This computer's sign-in is no longer valid. Run `skillpouch logout`, then `skillpouch login`.",
-        ),
+        Some("device_revoked") => {
+            Exit::not_logged_in("This computer was removed from your account.", RECONNECT)
+        }
+        Some("refresh_invalid" | "refresh_reused" | "member_inactive") => {
+            Exit::not_logged_in("This computer's sign-in is no longer valid.", RECONNECT)
+        }
         _ => error.into(),
     }
 }

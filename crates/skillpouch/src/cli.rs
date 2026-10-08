@@ -1,12 +1,31 @@
+use clap::builder::styling::{Ansi256Color, AnsiColor, Color, Style, Styles};
 use clap::{Parser, Subcommand};
+
+/// Help text in the CLI's colours (clap turns them off for pipes and `NO_COLOR`).
+const STYLES: Styles = {
+    let accent = Some(Color::Ansi256(Ansi256Color(141)));
+    Styles::styled()
+        .header(Style::new().bold().fg_color(accent))
+        .usage(Style::new().bold().fg_color(accent))
+        .literal(Style::new().fg_color(accent))
+        .placeholder(Style::new().dimmed())
+        .valid(Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green))))
+        .invalid(Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow))))
+        .error(
+            Style::new()
+                .bold()
+                .fg_color(Some(Color::Ansi(AnsiColor::Red))),
+        )
+};
 
 /// Sync your AI assistant skills, agents, MCP servers and instructions
 /// across every computer, end-to-end encrypted.
 #[derive(Debug, Parser)]
-#[command(name = "skillpouch", version, propagate_version = true)]
+#[command(name = "skillpouch", version, propagate_version = true, styles = STYLES)]
 pub struct Cli {
+    /// Without a command: the banner and what to run next.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
