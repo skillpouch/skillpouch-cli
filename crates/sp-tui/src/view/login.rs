@@ -3,7 +3,7 @@
 
 use super::widgets::{centered, keys, spinner};
 use crate::app::{App, Login};
-use crate::logo::{MARK, MARK_HEIGHT, MARK_WIDTH};
+use crate::mascot::{self, Mood};
 use crate::model::LoginStep;
 use crate::theme;
 use ratatui::Frame;
@@ -17,22 +17,24 @@ const WIDTH: u16 = 64;
 pub fn draw(app: &App, login: &Login, frame: &mut Frame, area: Rect) {
     let body = body(app, login);
     let body_height = u16::try_from(body.len()).unwrap_or(u16::MAX);
-    let with_mark = area.height >= MARK_HEIGHT + body_height + 6;
-    let height = body_height + if with_mark { MARK_HEIGHT + 2 } else { 0 };
+    let with_mark = area.height >= mascot::HEIGHT + body_height + 6;
+    let height = body_height + if with_mark { mascot::HEIGHT + 1 } else { 0 };
     let column = centered(area, WIDTH.min(area.width.saturating_sub(4)), height);
 
     let text = if with_mark {
         let [mark, _, text] = Layout::vertical([
-            Constraint::Length(MARK_HEIGHT),
-            Constraint::Length(2),
+            Constraint::Length(mascot::HEIGHT),
+            Constraint::Length(1),
             Constraint::Fill(1),
         ])
         .areas(column);
-        let mark = centered(mark, MARK_WIDTH, MARK_HEIGHT);
-        let lines: Vec<Line> = MARK
-            .iter()
-            .map(|row| Line::styled(*row, theme::brand()))
-            .collect();
+        let mark = centered(mark, mascot::WIDTH, mascot::HEIGHT);
+        let mood = match login.step {
+            None => Mood::Idle,
+            Some(LoginStep::Failed(_)) => Mood::Sad,
+            Some(_) => Mood::Busy,
+        };
+        let lines = mascot::render(&mascot::pose(app.tick, mood));
         frame.render_widget(Paragraph::new(lines), mark);
         text
     } else {

@@ -8,6 +8,7 @@
 
 mod app;
 pub mod logo;
+pub mod mascot;
 mod model;
 mod theme;
 mod view;
