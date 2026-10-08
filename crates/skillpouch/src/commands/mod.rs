@@ -24,7 +24,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
             name,
             no_browser,
         } => login::run(&ctx, token, name, no_browser).await,
-        Command::Logout => logout::run(&ctx),
+        Command::Logout => logout::run(&ctx).await,
         Command::Status { json } => status::run(&ctx, json).await,
     }
 }

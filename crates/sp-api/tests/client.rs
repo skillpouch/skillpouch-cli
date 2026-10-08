@@ -175,3 +175,24 @@ async fn parses_an_approved_login() -> Result<(), Box<dyn std::error::Error>> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn logs_this_computer_out() -> Result<(), Box<dyn std::error::Error>> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/devices/me/logout"))
+        .respond_with(nonce_guard(
+            json!({ "revoked": true, "rotation_pending": true }),
+        ))
+        .mount(&server)
+        .await;
+    let client = client(&server)?;
+    let key = SignKey::generate()?;
+
+    client.logout(&key, "access-123").await?;
+    let requests = server.received_requests().await.unwrap_or_default();
+    let last = requests.last().ok_or("no request")?;
+    assert_eq!(claims(last)["htm"], "POST");
+    assert_eq!(claims(last)["ath"], access_token_hash("access-123"));
+    Ok(())
+}

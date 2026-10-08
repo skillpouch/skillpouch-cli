@@ -9,8 +9,8 @@ use crate::exit::{Exit, NOT_LOGGED_IN};
 use crate::when;
 use anyhow::Result;
 use sp_api::types::{ArtifactList, DeviceList, Me, PouchList};
-use sp_core::assistants;
 use sp_core::home::user_home;
+use sp_core::{Credentials, assistants};
 use sp_tui::{
     Account, Assistant, Computer, Dashboard, Launch, LoginStep, Notice, Pouch, Request, Update,
 };
@@ -110,12 +110,23 @@ async fn serve(
                 }
             }
             Request::Logout => {
-                let update = match logout::forget(&ctx) {
+                let credentials = Credentials::load(&ctx.home).ok().flatten();
+                let removed = match credentials {
+                    Some(credentials) => logout::revoke(&ctx, credentials).await,
+                    None => true,
+                };
+                let update = match Credentials::remove(&ctx.home) {
                     Ok(_) => {
                         let _ = updates.send(Update::SignedOut);
-                        Notice::success("Logged out. This computer's keys are deleted.")
+                        if removed {
+                            Notice::success("Logged out. This computer is off your Devices page.")
+                        } else {
+                            Notice::info(
+                                "Logged out here. Couldn't reach the server: remove it on your Devices page.",
+                            )
+                        }
                     }
-                    Err(error) => Notice::error(message(&error)),
+                    Err(error) => Notice::error(error.to_string()),
                 };
                 let _ = updates.send(Update::Notice(update));
             }
@@ -155,7 +166,11 @@ async fn log_in(ctx: Arc<Context>, updates: Sender<Update>, mut cancelled: onesh
     });
     tokio::select! {
         approved = pending.wait(&ctx) => {
-            match approved.and_then(|approved| pending.save(&ctx, approved)) {
+            let saved = match approved {
+                Ok(approved) => pending.save(&ctx, approved).await,
+                Err(error) => Err(error),
+            };
+            match saved {
                 Ok(()) => {
                     send(LoginStep::Approved);
                     let _ = updates.send(load(&ctx).await);

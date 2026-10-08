@@ -1,6 +1,7 @@
 //! `skillpouch login`: create device keys, open a login request, let the user
 //! approve it in a signed-in, unlocked browser, then redeem it for tokens.
 
+use super::logout;
 use crate::browser;
 use crate::context::{Context, VERSION, unix_now};
 use crate::exit::{CANCELLED, Exit};
@@ -86,7 +87,7 @@ pub async fn run(
             return Err(Exit::with_code(CANCELLED, "Login cancelled.", Some("Nothing was saved. Run `skillpouch login` to try again.")));
         }
     };
-    pending.save(ctx, approved)?;
+    pending.save(ctx, approved).await?;
 
     ui::success(if replacing.is_some() {
         "Logged in with new keys"
@@ -100,9 +101,6 @@ pub async fn run(
         .row("Keys", ui::dim(ctx.home.root().display()).to_string());
     println!("{}", card.render(ui::width()));
     println!();
-    if replacing.is_some() {
-        ui::hint("The old login still shows on your Devices page; remove it there.");
-    }
     ui::hint("Run `skillpouch status` to see your account.");
     Ok(ExitCode::SUCCESS)
 }
@@ -184,8 +182,16 @@ impl Pending {
         let _ = ctx.client.cancel_login(&self.sign, &self.request_id).await;
     }
 
-    /// Saves the approved login, replacing any earlier one.
-    pub fn save(&self, ctx: &Context, (tokens, welcome): (DeviceTokens, String)) -> Result<()> {
+    /// Saves the approved login. An earlier login on this computer is removed
+    /// from the account first, so the Devices page lists this computer once.
+    pub async fn save(
+        &self,
+        ctx: &Context,
+        (tokens, welcome): (DeviceTokens, String),
+    ) -> Result<()> {
+        if let Some(old) = Credentials::load(&ctx.home).ok().flatten() {
+            logout::revoke(ctx, old).await;
+        }
         Credentials {
             format: Credentials::FORMAT,
             api_url: ctx.client.base().to_string(),

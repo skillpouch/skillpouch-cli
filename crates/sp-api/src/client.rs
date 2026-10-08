@@ -107,6 +107,16 @@ impl Client {
         self.get("/v1/devices", key, access_token).await
     }
 
+    /// Revokes this computer: the server forgets it and it leaves the devices list.
+    pub async fn logout(&self, key: &SignKey, access_token: &str) -> Result<()> {
+        self.send::<Value>(Call {
+            access_token: Some(access_token),
+            ..Call::new(Method::POST, "/v1/devices/me/logout", key)
+        })
+        .await
+        .map(drop)
+    }
+
     /// The first `limit` (at most 200) live items of a pouch.
     pub async fn artifacts(
         &self,
