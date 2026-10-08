@@ -25,15 +25,6 @@ pub async fn run(
     name: Option<String>,
     no_browser: bool,
 ) -> Result<ExitCode> {
-    if let Some(existing) = ctx.credentials()? {
-        return Err(Exit::failure(
-            format!(
-                "This computer is already logged in to {}.",
-                existing.api_url
-            ),
-            "Run `skillpouch logout` first to connect it again.",
-        ));
-    }
     if token
         .as_deref()
         .is_some_and(|token| !is_connect_token(token))
@@ -45,6 +36,16 @@ pub async fn run(
     }
 
     ui::banner(&format!("v{VERSION}"));
+    // Logging in again replaces the current login, but only once the new one
+    // is approved: a cancelled or denied login leaves this computer as it was.
+    let replacing = Credentials::load(&ctx.home).ok().flatten();
+    if let Some(existing) = &replacing {
+        ui::hint(format!(
+            "Already logged in to {}. Approving this login replaces it with new keys.",
+            existing.api_url
+        ));
+        println!();
+    }
     let spinner = Spinner::start("Creating this computer's keys…");
     let sign = SignKey::generate()?;
     let enc = EncKey::generate()?;
@@ -134,7 +135,11 @@ pub async fn run(
     }
     .save(&ctx.home)?;
 
-    ui::success("Logged in");
+    ui::success(if replacing.is_some() {
+        "Logged in with new keys"
+    } else {
+        "Logged in"
+    });
     println!();
     let card = Card::new("This computer")
         .row("Name", device_name.as_str())
@@ -142,6 +147,9 @@ pub async fn run(
         .row("Keys", ui::dim(ctx.home.root().display()).to_string());
     println!("{}", card.render(ui::width()));
     println!();
+    if replacing.is_some() {
+        ui::hint("The old login still shows on your Devices page; remove it there.");
+    }
     ui::hint("Run `skillpouch status` to see your account.");
     Ok(ExitCode::SUCCESS)
 }
