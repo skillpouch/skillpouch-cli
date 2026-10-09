@@ -120,8 +120,6 @@ pub struct App {
     pub setup: Option<Setup>,
     /// Asking before logging out.
     pub confirm_logout: bool,
-    /// Showing the hooks and plugins that wait for approval.
-    pub reviewing: bool,
     notice: Option<(Notice, Instant)>,
     pub tick: usize,
 }
@@ -141,7 +139,6 @@ impl App {
             login: (!signed_in).then(Login::idle),
             setup: None,
             confirm_logout: false,
-            reviewing: false,
             notice: None,
             tick: 0,
         }
@@ -216,9 +213,6 @@ impl App {
             Update::Sync(sync) => {
                 if let Status::Ready(dashboard) = &mut self.status {
                     dashboard.sync = sync;
-                }
-                if self.waiting().is_empty() {
-                    self.reviewing = false;
                 }
             }
             Update::Login(step) => self.login_step(step),
@@ -321,9 +315,6 @@ impl App {
         if self.confirm_logout {
             return self.on_logout_key(key.code);
         }
-        if self.reviewing {
-            return self.on_review_key(key.code);
-        }
         self.on_dashboard_key(key.code)
     }
 
@@ -382,25 +373,6 @@ impl App {
         }
     }
 
-    fn on_review_key(&mut self, code: KeyCode) -> Outcome {
-        self.reviewing = false;
-        match code {
-            KeyCode::Char('y') | KeyCode::Enter => Outcome::Send(Request::Approve),
-            _ => Outcome::Nothing,
-        }
-    }
-
-    /// Hooks and plugins that wait for approval on this computer.
-    pub fn waiting(&self) -> &[crate::model::WaitingView] {
-        match &self.status {
-            Status::Ready(dashboard) => dashboard
-                .sync
-                .as_ref()
-                .map_or(&[], |sync| sync.waiting.as_slice()),
-            _ => &[],
-        }
-    }
-
     fn on_dashboard_key(&mut self, code: KeyCode) -> Outcome {
         let index = self.tab.index();
         let count = Tab::ALL.len();
@@ -437,10 +409,6 @@ impl App {
                 Outcome::Send(Request::Refresh)
             }
             KeyCode::Char('o') => self.open(&self.web_path()),
-            KeyCode::Char('a') if !self.waiting().is_empty() => {
-                self.reviewing = true;
-                Outcome::Nothing
-            }
             KeyCode::Enter if self.tab == Tab::Pouches => self.use_selected_pouch(),
             KeyCode::Enter if self.tab == Tab::Account => {
                 match AccountAction::ALL.get(self.cursor(Tab::Account)) {

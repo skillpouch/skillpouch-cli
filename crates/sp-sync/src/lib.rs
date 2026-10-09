@@ -8,7 +8,6 @@
 //! MCP servers, hooks and plugins into their config files.
 
 pub mod adopt;
-pub mod approvals;
 mod command;
 pub mod engine;
 mod error;

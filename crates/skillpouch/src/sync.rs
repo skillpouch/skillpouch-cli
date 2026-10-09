@@ -10,11 +10,10 @@ use sp_core::setup::{FirstSync, SetupRecord};
 use sp_harness::{Harness, Places, Target};
 use sp_sync::SyncError;
 use sp_sync::adopt::{self, Found};
-use sp_sync::approvals::{Approvals, Waiting};
 use sp_sync::engine::{self, Options, Prefer};
 use sp_sync::hooks::{self, HookFile};
 use sp_sync::item::PouchDir;
-use sp_sync::item::{File, Files, LocalItem};
+use sp_sync::item::{File, Files};
 use sp_sync::plugins::{self, PluginFile};
 use sp_sync::project::{self, Projection};
 use sp_sync::remote::Remote;
@@ -42,8 +41,6 @@ pub struct Report {
     pub cursor: u64,
     pub epoch: String,
     pub first: bool,
-    /// Hooks and plugins from elsewhere that wait for approval here.
-    pub waiting: Vec<Waiting>,
     /// Items deleted in an assistant, so taken out of the pouch (`skill pdf`).
     pub removed: Vec<String>,
 }
@@ -74,25 +71,7 @@ pub fn view(
     let last = status
         .and_then(|status| status.last_synced_at.as_deref())
         .and_then(|at| crate::when::ago(at, now));
-    let waiting: Vec<sp_tui::WaitingView> = status
-        .map(|status| {
-            status
-                .waiting
-                .iter()
-                .map(|w| sp_tui::WaitingView {
-                    label: crate::approve::label(w),
-                    detail: w.detail.clone(),
-                    changed: w.changed,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let line = |tone, text: String, detail: Option<String>| SyncView {
-        tone,
-        text,
-        detail,
-        waiting: waiting.clone(),
-    };
+    let line = |tone, text: String, detail: Option<String>| SyncView { tone, text, detail };
     let not_running =
         || Some("Background sync isn't running: `skillpouch daemon start`".to_string());
     let Some(status) = status else {
@@ -144,29 +123,6 @@ pub fn view(
     })
 }
 
-/// `2 hooks and 1 plugin`.
-pub fn waiting_words(waiting: &[Waiting]) -> String {
-    let verb = if waiting.len() == 1 { "waits" } else { "wait" };
-    format!("{} {verb}", waiting_count(waiting))
-}
-
-fn waiting_count(waiting: &[Waiting]) -> String {
-    let count = |kind: &str| waiting.iter().filter(|w| w.kind == kind).count();
-    let words = |n: usize, one: &str, many: &str| match n {
-        0 => None,
-        1 => Some(format!("1 {one}")),
-        n => Some(format!("{n} {many}")),
-    };
-    [
-        words(count("hook"), "hook", "hooks"),
-        words(count("plugin"), "plugin", "plugins"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join(" and ")
-}
-
 /// Makes `pouch_id` the pouch this computer syncs from now on.
 pub fn switch_pouch(ctx: &Context, device_id: &str, pouch_id: &str) -> Result<()> {
     if let Some(mut record) = SetupRecord::load(&ctx.home)?
@@ -215,7 +171,6 @@ pub async fn run(ctx: &Context, session: &mut Session) -> Result<Report> {
             let mut status = base_status(ctx, Phase::Idle, Some(&report.pouch_id));
             status.last_synced_at = Some(now());
             status.message = (!report.problems.is_empty()).then(|| report.problems.join("\n"));
-            status.waiting = report.waiting.clone();
             if report.sent + report.received + report.conflicts > 0 {
                 status.sent = report.sent;
                 status.received = report.received;
@@ -271,7 +226,6 @@ fn base_status(ctx: &Context, phase: Phase, pouch_id: Option<&str>) -> SyncStatu
         conflicts: old.as_ref().map_or(0, |s| s.conflicts),
         daemon_pid: old.as_ref().and_then(|s| s.daemon_pid),
         updated_at: now(),
-        waiting: old.map(|s| s.waiting).unwrap_or_default(),
     }
 }
 
@@ -320,7 +274,6 @@ async fn run_with(ctx: &Context, session: &mut Session, mut record: SetupRecord)
         })
         .await?
     };
-    let mut approvals = Approvals::load(&ctx.home);
     if record.done {
         follow_assistants(
             &ctx.home,
@@ -353,20 +306,13 @@ async fn run_with(ctx: &Context, session: &mut Session, mut record: SetupRecord)
         )?
     };
     let claude_plugins = plugins::known_marketplaces(&places.claude);
-    bring_in_hooks_and_plugins(
-        &dir,
-        &targets,
-        &mut projection,
-        &mut approvals,
-        &claude_plugins,
-    )?;
+    bring_in_hooks_and_plugins(&dir, &targets, &mut projection, &claude_plugins)?;
 
     let mut state = PouchState::load(&ctx.home, &record.pouch_id)?;
     if state.epoch != remote.pouch.epoch && !state.epoch.is_empty() {
         // The pouch's history was rewritten: compare everything afresh.
         state = PouchState::default();
     }
-    approve_local_changes(&dir, &state, &remote, &mut approvals)?;
     for round in 0..ROUNDS {
         let outcome = engine::sync(
             &remote,
@@ -409,23 +355,13 @@ async fn run_with(ctx: &Context, session: &mut Session, mut record: SetupRecord)
     }
 
     let (items, _) = dir.read()?;
-    approvals.keep_only(items.values());
-    let (next, projected) = project::project(
-        &ctx.home,
-        &items,
-        &targets,
-        &backups,
-        &projection,
-        &approvals,
-    )?;
+    let (next, projected) = project::project(&ctx.home, &items, &targets, &backups, &projection)?;
     projection.links = next.links;
     projection.mcp = next.mcp;
     projection.copies = next.copies;
     projection.hooks = next.hooks;
     projection.plugins = next.plugins;
     projection.save(&ctx.home)?;
-    approvals.save(&ctx.home)?;
-    report.waiting = approvals.waiting(items.values());
     report.linked = projected.linked;
     report.backed_up.extend(projected.backed_up);
     report.problems.extend(projected.problems);
@@ -519,31 +455,6 @@ fn ignore_servers(projection: &mut Projection, targets: &[Target]) {
     }
 }
 
-/// Hooks and plugins changed in the pouch folder on this computer since the
-/// last sync were changed here, so they don't wait for approval. Only what
-/// arrives from the server does.
-fn approve_local_changes(
-    dir: &PouchDir,
-    state: &PouchState,
-    remote: &Remote<'_>,
-    approvals: &mut Approvals,
-) -> Result<()> {
-    let (items, _) = dir.read()?;
-    for (key, item) in &items {
-        if !sp_sync::approvals::KINDS.contains(&item.kind.as_str()) || approvals.approved(item) {
-            continue;
-        }
-        let synced = state
-            .items
-            .get(key)
-            .is_some_and(|agreed| agreed.fingerprint == remote.local_fingerprint(&item.files));
-        if !synced {
-            approvals.approve(item);
-        }
-    }
-    Ok(())
-}
-
 /// Hooks and plugins of assistants that weren't brought into the pouch at
 /// setup: left where they are, and not brought in later either.
 fn leave_hooks_and_plugins(projection: &mut Projection, targets: &[Target], except: Option<&str>) {
@@ -581,29 +492,17 @@ fn free_name(dir: &PouchDir, kind: &str, wanted: &str) -> String {
         .unwrap_or_else(|| wanted.to_string())
 }
 
-fn save_item(
-    dir: &PouchDir,
-    approvals: &mut Approvals,
-    kind: &str,
-    name: &str,
-    files: Files,
-) -> Result<()> {
+fn save_item(dir: &PouchDir, kind: &str, name: &str, files: Files) -> Result<()> {
     dir.write_item(kind, name, &files)?;
-    approvals.approve(&LocalItem {
-        kind: kind.into(),
-        name: name.into(),
-        files,
-    });
     Ok(())
 }
 
 /// Hooks and plugins set up in an assistant by hand (or edited there) go
-/// into the pouch. They already run here, so they count as approved.
+/// into the pouch.
 fn bring_in_hooks_and_plugins(
     dir: &PouchDir,
     targets: &[Target],
     projection: &mut Projection,
-    approvals: &mut Approvals,
     known_marketplaces: &std::collections::BTreeMap<String, serde_json::Value>,
 ) -> Result<()> {
     let (existing, _) = dir.read()?;
@@ -637,7 +536,7 @@ fn bring_in_hooks_and_plugins(
                 };
                 let files: Files =
                     [("hook.json".to_string(), File::new(hooks::hook_file(&hook)))].into();
-                save_item(dir, approvals, "hook", &item.name, files)?;
+                save_item(dir, "hook", &item.name, files)?;
                 have.push(hook);
             }
             for found in changes.added {
@@ -651,7 +550,7 @@ fn bring_in_hooks_and_plugins(
                 };
                 let files: Files =
                     [("hook.json".to_string(), File::new(hooks::hook_file(&hook)))].into();
-                save_item(dir, approvals, "hook", &name, files)?;
+                save_item(dir, "hook", &name, files)?;
                 have.push(hook);
                 // The entry is the pouch's from now on: changing the hook
                 // anywhere replaces it here too.
@@ -682,7 +581,7 @@ fn bring_in_hooks_and_plugins(
                 };
                 let files: Files =
                     [("plugin.json".to_string(), plugins::plugin_file(&plugin))].into();
-                save_item(dir, approvals, "plugin", &name, files)?;
+                save_item(dir, "plugin", &name, files)?;
                 have_plugins.push(plugin);
             }
         }
@@ -831,7 +730,6 @@ mod tests {
             conflicts: 0,
             daemon_pid: Some(1),
             updated_at: "2026-10-09T11:55:00Z".into(),
-            waiting: Vec::new(),
         }
     }
 

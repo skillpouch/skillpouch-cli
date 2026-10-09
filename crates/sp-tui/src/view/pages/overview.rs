@@ -67,29 +67,6 @@ pub fn overview(app: &App, frame: &mut Frame, area: Rect) {
     token_section(dashboard, frame, tokens);
 }
 
-/// `2 hooks wait for your OK`.
-fn waiting_text(waiting: &[crate::model::WaitingView]) -> Option<String> {
-    let hooks = waiting
-        .iter()
-        .filter(|w| w.label.starts_with("Hook"))
-        .count();
-    let plugins = waiting.len() - hooks;
-    let words = |n: usize, one: &str, many: &str| match n {
-        0 => None,
-        1 => Some(format!("1 {one}")),
-        n => Some(format!("{n} {many}")),
-    };
-    let parts: Vec<String> = [
-        words(hooks, "hook", "hooks"),
-        words(plugins, "plugin", "plugins"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    let verb = if waiting.len() == 1 { "waits" } else { "wait" };
-    (!parts.is_empty()).then(|| format!("{} {verb} for your OK", parts.join(" and ")))
-}
-
 /// `● Synced 2 min ago`, with the reason under it when there is one.
 fn sync_lines(view: &SyncView, tick: usize) -> Vec<Line<'static>> {
     let (mark, style) = match view.tone {
@@ -133,18 +110,7 @@ fn details(dashboard: &Dashboard, width: u16, tick: usize) -> Vec<Line<'static>>
                 vec![Span::styled(pouch.label(), theme::accent())],
             ));
             match &dashboard.sync {
-                Some(view) => {
-                    lines.extend(sync_lines(view, tick));
-                    if let Some(text) = waiting_text(&view.waiting) {
-                        lines.push(field(
-                            "Waiting",
-                            vec![
-                                Span::styled(text, theme::warn()),
-                                Span::styled(" · press a to review", theme::meta()),
-                            ],
-                        ));
-                    }
-                }
+                Some(view) => lines.extend(sync_lines(view, tick)),
                 None => {
                     let status = dashboard
                         .this_computer()

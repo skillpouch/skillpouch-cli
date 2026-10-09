@@ -58,9 +58,6 @@ pub fn draw(app: &App, frame: &mut Frame) {
     if app.confirm_logout {
         draw_logout(frame, area);
     }
-    if app.reviewing {
-        draw_review(app, frame, area);
-    }
 }
 
 fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
@@ -140,9 +137,6 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
         Tab::Account => pairs.push(("enter", "select")),
         _ => {}
     }
-    if !app.waiting().is_empty() {
-        pairs.push(("a", "review hooks"));
-    }
     pairs.extend([("o", "open in browser"), ("r", "refresh"), ("q", "quit")]);
     frame.render_widget(Paragraph::new(keys(&pairs)), area);
     draw_notice(app, frame, area);
@@ -196,54 +190,6 @@ fn draw_logout(frame: &mut Frame, area: Rect) {
         Line::default(),
         keys(&[("y", "log out"), ("n", "cancel")]),
     ];
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(block),
-        rect,
-    );
-}
-
-/// The hooks and plugins waiting for approval, and what each runs.
-fn draw_review(app: &App, frame: &mut Frame, area: Rect) {
-    let waiting = app.waiting();
-    let mut lines = vec![
-        Line::styled("Let these run on this computer?", theme::strong()),
-        Line::styled(
-            "They came from your pouch, not from here, and run commands by themselves.",
-            theme::meta(),
-        ),
-        Line::default(),
-    ];
-    for item in waiting {
-        let mut label = vec![Span::styled(item.label.clone(), theme::accent())];
-        if item.changed {
-            label.push(Span::styled(
-                "  changed · the version you approved runs until then",
-                theme::meta(),
-            ));
-        }
-        lines.push(Line::from(label));
-        lines.push(Line::styled(format!("  {}", item.detail), theme::text()));
-    }
-    lines.push(Line::default());
-    lines.push(keys(&[("y", "let them run"), ("n", "not now")]));
-    let width = 76.min(area.width.saturating_sub(4));
-    let inner = usize::from(width.saturating_sub(6)).max(1);
-    // Wrapped detail lines take more than one row.
-    let rows: usize = lines
-        .iter()
-        .map(|line| line.width().div_ceil(inner).max(1))
-        .sum();
-    let height = u16::try_from(rows + 3)
-        .unwrap_or(u16::MAX)
-        .min(area.height.saturating_sub(2));
-    let rect = centered(area, width, height);
-    frame.render_widget(Clear, rect);
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(theme::BORDER_STRONG))
-        .padding(Padding::new(2, 2, 1, 0));
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -331,47 +277,12 @@ pub(crate) mod tests {
             tone: crate::model::SyncTone::Warn,
             text: "Offline".into(),
             detail: Some("Can't reach the server · last synced 5 min ago".into()),
-            waiting: Vec::new(),
         })));
         let text = screen(&app, 120, 40);
         contains_all(&text, &["Sync", "Offline", "last synced 5 min ago"]);
         // Not set up (or signed out): no sync line at all.
         app.apply(Update::Sync(None));
         assert!(!screen(&app, 120, 40).contains("Offline"));
-    }
-
-    #[test]
-    fn waiting_hooks_are_shown_and_approved_with_a_key() {
-        let mut app = ready();
-        app.apply(Update::Sync(Some(crate::model::SyncView {
-            tone: crate::model::SyncTone::Good,
-            text: "Synced just now".into(),
-            detail: None,
-            waiting: vec![crate::model::WaitingView {
-                label: "Hook format".into(),
-                detail: "PostToolUse (Edit|Write): prettier --write .".into(),
-                changed: false,
-            }],
-        })));
-        contains_all(
-            &screen(&app, 120, 40),
-            &["1 hook waits for your OK", "a review hooks"],
-        );
-        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-        app.on_key(key(KeyCode::Char('a')));
-        contains_all(
-            &screen(&app, 120, 40),
-            &[
-                "Let these run on this computer?",
-                "Hook format",
-                "prettier --write .",
-            ],
-        );
-        assert_eq!(
-            app.on_key(key(KeyCode::Char('y'))),
-            crate::app::Outcome::Send(crate::model::Request::Approve)
-        );
-        assert!(!app.reviewing);
     }
 
     #[test]

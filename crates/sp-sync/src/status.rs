@@ -40,9 +40,6 @@ pub struct SyncStatus {
     /// The background process keeping this up to date.
     pub daemon_pid: Option<u32>,
     pub updated_at: String,
-    /// Hooks and plugins from elsewhere that wait for approval here.
-    #[serde(default)]
-    pub waiting: Vec<crate::approvals::Waiting>,
 }
 
 impl SyncStatus {

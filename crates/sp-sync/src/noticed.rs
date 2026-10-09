@@ -254,7 +254,6 @@ fn plugin_item<'a>(items: &'a BTreeMap<String, LocalItem>, id: &str) -> Option<&
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::approvals::Approvals;
     use crate::error::io;
     use crate::project::{project, set_current};
     use sp_harness::CommandFormat;
@@ -313,14 +312,7 @@ mod tests {
         }];
         let (items, _) = dir.read()?;
         let backups = home.root().join("backups/t");
-        let (projection, _) = project(
-            &home,
-            &items,
-            &targets,
-            &backups,
-            &Projection::default(),
-            &Approvals::default(),
-        )?;
+        let (projection, _) = project(&home, &items, &targets, &backups, &Projection::default())?;
         Ok(Setup {
             _tmp: tmp,
             home,

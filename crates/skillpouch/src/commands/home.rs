@@ -11,7 +11,6 @@ const COMMANDS: &[(&str, &str)] = &[
     ("status", "Account, plan and storage"),
     ("sync", "Sync this computer's pouch now"),
     ("daemon start", "Keep it in sync in the background"),
-    ("approve", "Let new hooks and plugins run here"),
     ("logout", "Forget this computer's keys"),
 ];
 

@@ -46,12 +46,6 @@ pub async fn once(ctx: &Context) -> Result<ExitCode> {
     for problem in &report.problems {
         ui::warn(problem);
     }
-    if !report.waiting.is_empty() {
-        ui::warn(format!(
-            "{} for your OK before running here: `skillpouch approve`",
-            crate::sync::waiting_words(&report.waiting)
-        ));
-    }
     if !daemon::running(ctx) {
         ui::hint("Keep it in sync automatically: `skillpouch daemon start`.");
     }

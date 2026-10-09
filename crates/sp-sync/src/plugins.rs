@@ -69,18 +69,6 @@ pub fn of(item: &LocalItem) -> Option<Kind> {
     (plugin.source.is_some() || plugin.npm.is_some()).then_some(Kind::Reference(plugin))
 }
 
-/// What waits for approval, in words.
-pub fn describe(item: &LocalItem) -> String {
-    match of(item) {
-        Some(Kind::Folder { .. }) => format!("plugin folder ({} files)", item.files.len()),
-        Some(Kind::Reference(plugin)) => plugin
-            .source
-            .or(plugin.npm.map(|npm| format!("npm {npm}")))
-            .unwrap_or_default(),
-        None => "plugin.json without a source".into(),
-    }
-}
-
 pub fn plugin_file(plugin: &Plugin) -> File {
     let mut text = serde_json::to_string_pretty(plugin).unwrap_or_default();
     text.push('\n');
@@ -157,7 +145,7 @@ fn on(path: &Path, format: PluginFormat) -> (BTreeSet<String>, Value) {
     (ids, value)
 }
 
-/// Writes the approved plugin items into one config file.
+/// Writes the pouch's plugin items into one config file.
 pub fn write(
     path: &Path,
     format: PluginFormat,

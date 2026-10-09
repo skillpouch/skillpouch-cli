@@ -51,14 +51,6 @@ pub enum Command {
     },
     /// Sync this computer's pouch now.
     Sync,
-    /// Let hooks and plugins from elsewhere run on this computer.
-    Approve {
-        /// Only these (by name); all that wait when left out.
-        names: Vec<String>,
-        /// Don't ask first.
-        #[arg(long, short)]
-        yes: bool,
-    },
     /// The background sync that keeps this computer up to date.
     Daemon {
         #[command(subcommand)]

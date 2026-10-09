@@ -17,7 +17,7 @@ mod view;
 
 pub use model::{
     Account, Computer, Dashboard, FirstSync, Launch, LoginStep, Notice, Pouch, Request,
-    SetupChoice, SyncTone, SyncView, Tone, Update, WaitingView,
+    SetupChoice, SyncTone, SyncView, Tone, Update,
 };
 
 use app::{App, Outcome, Status};

@@ -25,7 +25,6 @@ skillpouch status [--json]
 skillpouch sync             # sync once, in the foreground
 skillpouch daemon start     # keep syncing in the background (systemd / launchd user service)
 skillpouch daemon stop | status
-skillpouch approve [<name>…] [--yes]   # let hooks and plugins from elsewhere run here
 skillpouch logout
 skillpouch --version
 ```
@@ -48,10 +47,9 @@ skillpouch --version
 - Plugins: references (`plugin@marketplace`, or an npm package for OpenCode) and
   whole plugin folders, which Claude Code and Factory install from a `skillpouch`
   marketplace in the pouch's `plugins/` folder.
-- Hooks and plugins run commands by themselves, so ones that arrive from the web or
-  another computer wait until `skillpouch approve` (or `a` in the TUI). A changed
-  hook keeps running as approved until the change is. What this computer brought in
-  itself counts as approved.
+- Hooks and plugins from the pouch are installed on every computer as they arrive,
+  like everything else. Only your own devices can write to the pouch (every change is
+  signed and end-to-end encrypted).
 - What you do in an assistant, with its own commands or by hand, is synced: a new
   skill, agent, command, MCP server, hook or plugin goes into the pouch; one you
   delete there (`claude mcp remove`, deleting a skill folder, turning a plugin off)

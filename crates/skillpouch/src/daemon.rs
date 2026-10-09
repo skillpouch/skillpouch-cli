@@ -193,7 +193,6 @@ fn set_pid(ctx: &Context, pid: Option<u32>) {
         conflicts: 0,
         daemon_pid: None,
         updated_at: sync::now(),
-        waiting: Vec::new(),
     });
     status.daemon_pid = pid;
     status.updated_at = sync::now();
@@ -265,7 +264,6 @@ pub fn local_signature(ctx: &Context) -> u64 {
     add(&ctx.home.root().join("pouches"), true);
     add(&ctx.home.state_dir().join("setup.json"), false);
     add(&ctx.home.credentials_file(), false);
-    add(&ctx.home.state_dir().join("approved.json"), false);
     if let Some(home) = user_home() {
         let places = Places::of(&home, ctx.home.root());
         for target in sp_harness::targets(&places) {

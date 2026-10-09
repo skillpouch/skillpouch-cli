@@ -95,19 +95,6 @@ pub struct SyncView {
     /// `Synced 2 min ago`, `Syncing…`, `Offline`.
     pub text: String,
     pub detail: Option<String>,
-    /// Hooks and plugins from elsewhere that wait for approval here.
-    pub waiting: Vec<WaitingView>,
-}
-
-/// Something that would run commands here, waiting for approval.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WaitingView {
-    /// `Hook format`.
-    pub label: String,
-    /// What it runs.
-    pub detail: String,
-    /// An older version, approved before, runs meanwhile.
-    pub changed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,8 +142,6 @@ pub enum Request {
     /// Look at this computer's assistants and set it up.
     Setup,
     FinishSetup(SetupChoice),
-    /// Let the waiting hooks and plugins run on this computer.
-    Approve,
 }
 
 /// The pouch a computer syncs and how its first sync starts.

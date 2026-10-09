@@ -111,20 +111,6 @@ async fn serve(
                     let _ = cancel.send(());
                 }
             }
-            Request::Approve => {
-                let notice = match crate::approve::approve(&ctx, None) {
-                    Ok(approved) if crate::daemon::running(&ctx) => Notice::success(format!(
-                        "Approved {}. The background sync puts them in place.",
-                        approved.len()
-                    )),
-                    Ok(approved) => Notice::info(format!(
-                        "Approved {}. They're put in place on the next sync.",
-                        approved.len()
-                    )),
-                    Err(error) => Notice::error(error.to_string()),
-                };
-                let _ = updates.send(Update::Notice(notice));
-            }
             Request::Logout => {
                 let credentials = Credentials::load(&ctx.home).ok().flatten();
                 let removed = match credentials {

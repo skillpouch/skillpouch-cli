@@ -1,7 +1,7 @@
 //! Making the pouch what every assistant on this computer uses: links from
 //! their folders into `~/.skillpouch/current/…` (so an edit in any assistant
 //! edits the pouch), and MCP servers, hooks and plugins written into their
-//! config files (hooks and plugins only once approved on this computer).
+//! config files.
 //!
 //! Where a link can't work, the assistant gets a copy instead: commands in
 //! Gemini's TOML format, and files on Windows without Developer Mode. Edits
@@ -12,7 +12,6 @@
 //! that the pouch no longer needs are removed. Assistants whose folder is
 //! part of a git checkout are only read. Nothing else is touched.
 
-use crate::approvals::Approvals;
 use crate::error::io;
 use crate::hooks::{self, HookFile};
 use crate::item::{self, LocalItem};
@@ -234,15 +233,14 @@ pub fn set_current(home: &Home, pouch_dir: &Path) -> Result<()> {
     fs::rename(&staged, &link).map_err(io(&link))
 }
 
-/// Links `items` into every target and writes their MCP servers, and the
-/// hooks and plugins `approvals` lets run here.
+/// Links `items` into every target and writes their MCP servers, hooks and
+/// plugins.
 pub fn project(
     home: &Home,
     items: &BTreeMap<String, LocalItem>,
     targets: &[Target],
     backups: &Path,
     previous: &Projection,
-    approvals: &Approvals,
 ) -> Result<(Projection, Projected)> {
     let base = current(home);
     let file_links = file_links_work(home);
@@ -399,7 +397,13 @@ pub fn project(
     let hooks_to_run: Vec<hooks::Hook> = items
         .values()
         .filter(|item| item.kind == "hook")
-        .filter_map(|item| approvals.hook_to_run(item))
+        .filter_map(|item| {
+            let hook = hooks::parse_hook(&item.files.get("hook.json")?.bytes).ok()?;
+            Some(hooks::Hook {
+                name: item.name.clone(),
+                ..hook
+            })
+        })
         .collect();
     for target in &writable {
         let Some((path, format)) = &target.hooks else {
@@ -418,16 +422,16 @@ pub fn project(
         }
     }
 
-    let approved: Vec<&LocalItem> = items
+    let plugin_items: Vec<&LocalItem> = items
         .values()
-        .filter(|item| item.kind == "plugin" && approvals.approved(item))
+        .filter(|item| item.kind == "plugin")
         .collect();
     let marketplace = base.join("plugins");
     if writable
         .iter()
         .any(|target| matches!(target.plugins, Some((_, PluginFormat::Claude))))
     {
-        plugins::write_marketplace(&marketplace, &approved)?;
+        plugins::write_marketplace(&marketplace, &plugin_items)?;
     }
     for target in &writable {
         let Some((path, format)) = &target.plugins else {
@@ -436,7 +440,7 @@ pub fn project(
         match plugins::write(
             path,
             *format,
-            &approved,
+            &plugin_items,
             &marketplace,
             previous.plugins.get(path),
         )? {
@@ -660,7 +664,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn hooks_and_plugins_reach_assistants_only_once_approved() -> Result<()> {
+    fn hooks_and_plugins_reach_every_assistant() -> Result<()> {
         let tmp = tempfile::tempdir().map_err(io(Path::new(".")))?;
         let home = Home::new(tmp.path().join(".skillpouch"));
         let pouch = home.root().join("pouches/p1");
@@ -709,28 +713,7 @@ mod tests {
         let targets = [claude_target, gemini_target];
         let backups = home.root().join("backups/t1");
 
-        // Not approved yet: nothing runs.
-        let mut approvals = Approvals::default();
-        let (first, _) = project(
-            &home,
-            &items,
-            &targets,
-            &backups,
-            &Projection::default(),
-            &approvals,
-        )?;
-        assert!(
-            !settings.exists()
-                || !fs::read_to_string(&settings)
-                    .map_err(io(&settings))?
-                    .contains("prettier")
-        );
-        assert_eq!(approvals.waiting(items.values()).len(), 2);
-
-        for item in items.values() {
-            approvals.approve(item);
-        }
-        let (second, _) = project(&home, &items, &targets, &backups, &first, &approvals)?;
+        let (second, _) = project(&home, &items, &targets, &backups, &Projection::default())?;
         let value: Value =
             serde_json::from_str(&fs::read_to_string(&settings).map_err(io(&settings))?)
                 .map_err(|e| SyncError::Invalid(e.to_string()))?;
@@ -752,14 +735,7 @@ mod tests {
         );
 
         // Gone from the pouch: gone from the assistants.
-        let (_, _) = project(
-            &home,
-            &BTreeMap::new(),
-            &targets,
-            &backups,
-            &second,
-            &approvals,
-        )?;
+        let (_, _) = project(&home, &BTreeMap::new(), &targets, &backups, &second)?;
         let value: Value =
             serde_json::from_str(&fs::read_to_string(&settings).map_err(io(&settings))?)
                 .map_err(|e| SyncError::Invalid(e.to_string()))?;
@@ -806,14 +782,8 @@ mod tests {
         set_current(&home, &pouch)?;
         let targets = [target(&claude, &json)];
         let backups = home.root().join("backups/t1");
-        let (projection, report) = project(
-            &home,
-            &items,
-            &targets,
-            &backups,
-            &Projection::default(),
-            &Approvals::default(),
-        )?;
+        let (projection, report) =
+            project(&home, &items, &targets, &backups, &Projection::default())?;
         assert_eq!(report.linked, 3, "{report:?}");
         assert_eq!(report.backed_up.len(), 1);
         assert_eq!(
@@ -852,14 +822,7 @@ mod tests {
             .into_iter()
             .filter(|(_, item)| item.kind != "skill" && item.kind != "mcp_server")
             .collect();
-        let (_, report) = project(
-            &home,
-            &fewer,
-            &targets,
-            &backups,
-            &projection,
-            &Approvals::default(),
-        )?;
+        let (_, report) = project(&home, &fewer, &targets, &backups, &projection)?;
         assert!(report.problems.is_empty(), "{report:?}");
         assert!(fs::symlink_metadata(claude.join("skills/pdf")).is_err());
         let config: Value = serde_json::from_str(&fs::read_to_string(&json).map_err(io(&json))?)
@@ -924,7 +887,6 @@ mod tests {
             &[target.clone(), locked],
             &backups,
             &Projection::default(),
-            &Approvals::default(),
         )?;
         let copy = gemini.join("commands/review.toml");
         let text = fs::read_to_string(&copy).map_err(io(&copy))?;
@@ -959,17 +921,9 @@ mod tests {
             std::slice::from_ref(&target),
             &backups,
             &projection,
-            &Approvals::default(),
         )?;
         assert!(copy.exists());
-        let (next, _) = project(
-            &home,
-            &BTreeMap::new(),
-            &[target],
-            &backups,
-            &next,
-            &Approvals::default(),
-        )?;
+        let (next, _) = project(&home, &BTreeMap::new(), &[target], &backups, &next)?;
         assert!(!copy.exists());
         assert!(next.copies.is_empty());
         Ok(())

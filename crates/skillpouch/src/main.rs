@@ -1,4 +1,3 @@
-mod approve;
 mod browser;
 mod cli;
 mod commands;

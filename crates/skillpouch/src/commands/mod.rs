@@ -1,4 +1,3 @@
-mod approve;
 mod home;
 mod login;
 mod logout;
@@ -29,7 +28,6 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         Command::Logout => logout::run(&ctx).await,
         Command::Status { json } => status::run(&ctx, json).await,
         Command::Sync => sync::once(&ctx).await,
-        Command::Approve { names, yes } => approve::run(&ctx, names, yes).await,
         Command::Daemon { action } => match action {
             DaemonAction::Start => sync::start(&ctx),
             DaemonAction::Stop => sync::stop(&ctx),
