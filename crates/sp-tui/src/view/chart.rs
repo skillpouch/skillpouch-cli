@@ -100,11 +100,37 @@ pub fn legend() -> Line<'static> {
     Line::from(spans)
 }
 
-/// The last `days` days as bars `height` rows tall, with the first date and
-/// "Today" under them.
-pub fn bars(usage: &Usage, days: usize, height: usize) -> Vec<Line<'static>> {
+/// Width of the y-axis labels left of the columns (`796M ┤`).
+const AXIS: usize = 8;
+/// The chart never goes back less than this, so a new account isn't one fat bar.
+const MIN_DAYS: usize = 14;
+
+/// The days the column chart shows: from the first day with tokens (at
+/// least two weeks back) to today, no more than `width` of them.
+pub fn chart_days(usage: &Usage, width: usize) -> usize {
+    let most = width.saturating_sub(AXIS).max(MIN_DAYS);
+    let first = usage.per_day().into_iter().find(|(_, total)| *total > 0);
+    let since = first.map_or(MIN_DAYS, |(day, _)| {
+        usize::try_from((usage.today - day).whole_days() + 1).unwrap_or(MIN_DAYS)
+    });
+    since.clamp(MIN_DAYS, most)
+}
+
+/// Where each day's slot starts across `width` columns: the days share the
+/// whole width, so the chart always spans it.
+fn slots(days: usize, width: usize) -> Vec<(usize, usize)> {
+    (0..days)
+        .map(|day| (day * width / days, (day + 1) * width / days))
+        .collect()
+}
+
+/// Tokens per day as columns across the whole `width`, `height` rows tall:
+/// a y-axis with the peak and half of it, a baseline, and month names
+/// under the days they start.
+pub fn columns(usage: &Usage, days: usize, width: usize, height: usize) -> Vec<Line<'static>> {
     let per_day = usage.per_day();
-    let first = usage.today - Duration::days(i64::try_from(days.saturating_sub(1)).unwrap_or(0));
+    let days = days.max(1);
+    let first = usage.today - Duration::days(i64::try_from(days - 1).unwrap_or(0));
     let values: Vec<u64> = (0..days)
         .map(|offset| {
             let day = first + Duration::days(i64::try_from(offset).unwrap_or(0));
@@ -112,6 +138,8 @@ pub fn bars(usage: &Usage, days: usize, height: usize) -> Vec<Line<'static>> {
         })
         .collect();
     let peak = values.iter().copied().max().unwrap_or(0);
+    let plot = width.saturating_sub(AXIS).max(days);
+    let slots = slots(days, plot);
     let eighths: Vec<usize> = values
         .iter()
         .map(|&value| {
@@ -124,33 +152,84 @@ pub fn bars(usage: &Usage, days: usize, height: usize) -> Vec<Line<'static>> {
         })
         .collect();
 
+    let axis = |row: usize| -> String {
+        let label = if peak == 0 {
+            String::new()
+        } else if row == 0 {
+            compact(peak)
+        } else if row == height / 2 && height >= 4 {
+            compact(peak / 2)
+        } else {
+            String::new()
+        };
+        let tick = if label.is_empty() { "│" } else { "┤" };
+        format!("{label:>width$} {tick}", width = AXIS - 2)
+    };
     let mut lines = Vec::new();
     for row in 0..height {
         let floor = (height - 1 - row) * 8;
-        let spans: Vec<Span<'static>> = eighths
-            .iter()
-            .enumerate()
-            .map(|(index, &fill)| {
-                let part = fill.saturating_sub(floor).min(8);
-                let block = if part == 0 { " " } else { BLOCKS[part - 1] };
-                let style = if index + 1 == days {
-                    theme::accent()
-                } else {
-                    theme::brand()
-                };
-                Span::styled(format!("{block} "), style)
-            })
-            .collect();
+        let mut spans = vec![Span::styled(axis(row), theme::meta())];
+        for (index, (&(from, to), &fill)) in slots.iter().zip(&eighths).enumerate() {
+            let slot = to - from;
+            // A column of space between days once there's room for it.
+            let bar = if slot >= 3 { slot - 1 } else { slot };
+            let part = fill.saturating_sub(floor).min(8);
+            let block = if part == 0 { " " } else { BLOCKS[part - 1] };
+            let style = if index + 1 == days {
+                theme::accent()
+            } else {
+                theme::brand()
+            };
+            spans.push(Span::styled(block.repeat(bar), style));
+            spans.push(Span::raw(" ".repeat(slot - bar)));
+        }
         lines.push(Line::from(spans));
     }
-    let start = format!("{} {}", short_month(first.month()), first.day());
-    let width = days * CELL - 1;
-    let gap = width.saturating_sub(start.len() + "Today".len());
-    lines.push(Line::styled(
-        format!("{start}{}Today", " ".repeat(gap)),
-        theme::meta(),
-    ));
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{:>width$} └", "0", width = AXIS - 2),
+            theme::meta(),
+        ),
+        Span::styled("─".repeat(plot), Style::default().fg(theme::BORDER)),
+    ]));
+    lines.push(day_labels(first, &slots));
     lines
+}
+
+/// The first day, each month's first day and "Today", under their columns;
+/// a label that would run into the one before it is left out.
+fn day_labels(first: Date, slots: &[(usize, usize)]) -> Line<'static> {
+    let last = slots.len().saturating_sub(1);
+    let plot = slots.last().map_or(0, |slot| slot.1);
+    let mut marks: Vec<(usize, String)> = Vec::new();
+    for (index, &(from, _)) in slots.iter().enumerate() {
+        let day = first + Duration::days(i64::try_from(index).unwrap_or(0));
+        let label = if index == 0 || day.day() == 1 {
+            format!("{} {}", short_month(day.month()), day.day())
+        } else {
+            continue;
+        };
+        marks.push((from, label));
+    }
+    let today = "Today";
+    let mut text = String::new();
+    for (at, label) in marks {
+        let room = plot.saturating_sub(today.len() + 1);
+        if at < text.chars().count() + usize::from(!text.is_empty()) || at + label.len() > room {
+            continue;
+        }
+        text.push_str(&" ".repeat(at - text.chars().count()));
+        text.push_str(&label);
+    }
+    let today_at = slots.get(last).map_or(0, |&(from, to)| {
+        (from + to)
+            .saturating_sub(today.len())
+            .min(plot.saturating_sub(today.len()))
+    });
+    let today_at = today_at.max(text.chars().count() + 1);
+    text.push_str(&" ".repeat(today_at - text.chars().count()));
+    text.push_str(today);
+    Line::styled(format!("{}{text}", " ".repeat(AXIS)), theme::meta())
 }
 
 /// `name  ━━━━━━━━  1.2M`, the bar scaled to `max`.
@@ -161,7 +240,7 @@ pub fn bar_line(
     name_width: usize,
     bar_width: usize,
 ) -> Line<'static> {
-    let filled = if max == 0 {
+    let filled = if max == 0 || value == 0 {
         0
     } else {
         ((value as f64 / max as f64 * bar_width as f64).round() as usize).clamp(1, bar_width)
@@ -245,13 +324,48 @@ mod tests {
     }
 
     #[test]
-    fn bars_scale_to_the_peak_and_label_the_ends() {
-        let lines = bars(&usage(), 10, 2);
-        assert_eq!(lines.len(), 3);
-        // Sep 30 (8K, the peak) fills both rows; Oct 1 (4K) only the lower.
-        assert!(text(&lines[0]).starts_with("█   "));
-        assert!(text(&lines[1]).starts_with("█ █ "));
-        assert_eq!(text(&lines[2]), format!("Sep 30{}Today", " ".repeat(8)));
+    fn the_chart_starts_at_the_first_day_with_tokens() {
+        // Sep 30 is the first: 10 days, but never less than two weeks.
+        assert_eq!(chart_days(&usage(), 200), MIN_DAYS);
+        let mut long = usage();
+        long.days[4].day = time::macros::date!(2026 - 07 - 01);
+        assert_eq!(chart_days(&long, 200), 101);
+        // A narrow terminal shows what fits.
+        assert_eq!(chart_days(&long, AXIS + 40), 40);
+    }
+
+    #[test]
+    fn columns_fill_the_whole_width() {
+        let width = AXIS + 70;
+        let lines = columns(&usage(), 14, width, 4);
+        // Rows, baseline, labels.
+        assert_eq!(lines.len(), 6);
+        for line in &lines[..5] {
+            assert_eq!(text(line).chars().count(), width, "{}", text(line));
+        }
+        // The peak (Sep 30, 8K) is labelled and reaches the top row.
+        assert!(text(&lines[0]).starts_with("  8.0K ┤"));
+        assert!(text(&lines[2]).starts_with("  4.0K ┤"));
+        assert!(text(&lines[4]).starts_with("     0 └───"));
+        let labels = text(&lines[5]);
+        assert!(
+            labels.contains("Sep 26") && labels.contains("Oct 1"),
+            "{labels}"
+        );
+        assert!(labels.ends_with("Today"), "{labels}");
+        // Sep 30 is day 5 of 14: its slot starts at 4 * 70 / 14 = 20.
+        let top = text(&lines[0]);
+        assert_eq!(top.chars().nth(AXIS + 20), Some('█'));
+        assert_eq!(top.chars().nth(AXIS + 19), Some(' '));
+    }
+
+    #[test]
+    fn a_quiet_range_draws_only_the_axis() {
+        let mut quiet = usage();
+        quiet.days.clear();
+        let lines = columns(&quiet, 14, 40, 3);
+        assert!(text(&lines[0]).trim().starts_with('│'));
+        assert!(text(&lines[4]).ends_with("Today"));
     }
 
     #[test]

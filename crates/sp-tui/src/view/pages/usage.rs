@@ -1,5 +1,6 @@
-//! Tokens of every computer: totals, the last weeks day by day, and where
-//! this month's went.
+//! Tokens of every computer: totals, every day since the first one as
+//! columns across the page, and the last week, models and assistants side
+//! by side.
 
 use super::loaded;
 use crate::app::App;
@@ -11,10 +12,13 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-const MAX_DAYS: usize = 120;
-const BAR_ROWS: usize = 6;
+/// Rows of columns: as tall as the page allows, within these.
+const MIN_ROWS: u16 = 4;
+const MAX_ROWS: u16 = 12;
+/// Days in the "Last 7 days" list.
+const WEEK: i64 = 7;
 /// Rows per breakdown list.
-const TOP: usize = 6;
+const TOP: usize = 7;
 
 pub fn usage(app: &App, frame: &mut Frame, area: Rect) {
     let Some(dashboard) = loaded(app, frame, area) else {
@@ -31,13 +35,14 @@ pub fn usage(app: &App, frame: &mut Frame, area: Rect) {
             return;
         }
     };
-    let [totals, _, recent, _, breakdown, split_line] = Layout::vertical([
+    let [totals, _, recent, _, breakdown, _, split_line] = Layout::vertical([
         Constraint::Length(2),
-        Constraint::Length(2),
-        Constraint::Length(BAR_ROWS as u16 + 2),
-        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Min(MIN_ROWS + 3),
+        Constraint::Length(1),
         Constraint::Length(TOP as u16 + 1),
-        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
     ])
     .areas(area);
 
@@ -56,20 +61,25 @@ pub fn usage(app: &App, frame: &mut Frame, area: Rect) {
         );
     }
 
-    let days = (usize::from(recent.width) / 2).clamp(7, MAX_DAYS);
+    let width = usize::from(recent.width);
+    let days = chart::chart_days(usage, width);
+    let rows = recent.height.saturating_sub(3).clamp(MIN_ROWS, MAX_ROWS);
     let mut lines = vec![Line::from(vec![
         Span::styled(format!("Last {days} days"), theme::strong()),
         Span::styled(peak(usage, days), theme::meta()),
     ])];
-    lines.extend(chart::bars(usage, days, BAR_ROWS));
+    lines.extend(chart::columns(usage, days, width, usize::from(rows)));
     frame.render_widget(Paragraph::new(lines), recent);
 
-    let [models, _, assistants] = Layout::horizontal([
+    let [week, _, models, _, assistants] = Layout::horizontal([
         Constraint::Fill(1),
-        Constraint::Length(4),
+        Constraint::Length(3),
+        Constraint::Fill(1),
+        Constraint::Length(3),
         Constraint::Fill(1),
     ])
     .areas(breakdown);
+    list(frame, week, "Last 7 days", &last_week(usage));
     let from = usage.start(Period::Month);
     list(frame, models, "This month by model", &usage.by_model(from));
     list(
@@ -82,6 +92,22 @@ pub fn usage(app: &App, frame: &mut Frame, area: Rect) {
         Paragraph::new(kinds(&usage.total(Period::Month))).wrap(Wrap { trim: false }),
         split_line,
     );
+}
+
+/// Today, Yesterday, then `Wed 7` for the days before, newest first.
+fn last_week(usage: &Usage) -> Vec<(String, u64)> {
+    let per_day = usage.per_day();
+    (0..WEEK)
+        .map(|back| {
+            let day = usage.today - time::Duration::days(back);
+            let name = match back {
+                0 => "Today".to_string(),
+                1 => "Yesterday".to_string(),
+                _ => format!("{:.3} {}", day.weekday().to_string(), day.day()),
+            };
+            (name, per_day.get(&day).copied().unwrap_or(0))
+        })
+        .collect()
 }
 
 /// `   peak 4.1M on Oct 3`
@@ -107,7 +133,7 @@ fn list(frame: &mut Frame, area: Rect, title: &str, rows: &[(String, u64)]) {
     if rows.is_empty() {
         lines.push(Line::styled("Nothing yet.", theme::meta()));
     }
-    let max = rows.first().map_or(0, |(_, value)| *value);
+    let max = rows.iter().map(|(_, value)| *value).max().unwrap_or(0);
     let width = usize::from(area.width);
     let name_width = rows
         .iter()

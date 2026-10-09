@@ -366,7 +366,7 @@ pub(crate) mod tests {
             &[
                 "This week",
                 "3.5K",
-                "Last 53 days",
+                "Last 14 days",
                 "peak 8.0K on Sep 30",
                 "claude-sonnet",
                 "This month by assistant",
