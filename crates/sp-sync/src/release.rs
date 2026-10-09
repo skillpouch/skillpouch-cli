@@ -108,6 +108,26 @@ pub fn release(
     Ok(released)
 }
 
+/// Before this computer starts over with the pouch folder `next` (a new
+/// login, another account or server): everything still linked into the
+/// pouch folder used so far becomes the assistants' own again, so setting up
+/// finds it as real content instead of links that are about to point
+/// elsewhere. `None` when `next` is already the folder in use.
+pub fn leave_pouch(
+    home: &Home,
+    projection: &mut Projection,
+    targets: &[Target],
+    next: &Path,
+) -> Result<Option<Released>> {
+    let Ok(used) = fs::read_link(current(home)) else {
+        return Ok(None);
+    };
+    if used == next || !used.exists() {
+        return Ok(None);
+    }
+    release(home, projection, targets, &|_, _| true).map(Some)
+}
+
 /// The kind of the pouch item a link or copy points into.
 fn kind_of(base: &Path, to: &Path) -> Option<String> {
     let folder = to.strip_prefix(base).ok()?.components().next()?;
@@ -223,6 +243,59 @@ mod tests {
         // The server entry stays in the config, now the user's.
         let config = fs::read_to_string(&json).map_err(io(&json))?;
         assert!(config.contains("\"gh\""));
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_pouch_finds_what_the_old_one_had_linked_as_real_content() -> Result<()> {
+        let tmp = tempfile::tempdir().map_err(io(Path::new(".")))?;
+        let home = Home::new(tmp.path().join(".skillpouch"));
+        let old = home.root().join("pouches/old");
+        let next = home.root().join("pouches/new");
+        let dir = PouchDir::new(&old);
+        let claude = tmp.path().join(".claude");
+        fs::create_dir_all(&claude).map_err(io(&claude))?;
+        dir.write_item(
+            "skill",
+            "pdf",
+            &[("SKILL.md".to_string(), File::new("# PDF"))].into(),
+        )?;
+        dir.write_item(
+            "instructions",
+            item::INSTRUCTIONS,
+            &[("INSTRUCTIONS.md".to_string(), File::new("# Rules"))].into(),
+        )?;
+        set_current(&home, &old)?;
+        let places = sp_harness::Places::plain(tmp.path(), home.root());
+        let targets: Vec<Target> = sp_harness::targets(&places)
+            .into_iter()
+            .filter(|target| target.id == "claude-code")
+            .collect();
+        let (items, _) = dir.read()?;
+        let backups = home.root().join("backups/t");
+        let (mut projection, _) =
+            project(&home, &items, &targets, &backups, &Projection::default())?;
+        // Linked: the assistant has nothing of its own.
+        let found = |places: &sp_harness::Places| {
+            sp_harness::discover(places)
+                .into_iter()
+                .find(|harness| harness.id == "claude-code")
+                .map_or(0, |harness| harness.items.len())
+        };
+        assert_eq!(found(&places), 0);
+
+        // Same folder: nothing to do.
+        assert_eq!(leave_pouch(&home, &mut projection, &targets, &old)?, None);
+        let left = leave_pouch(&home, &mut projection, &targets, &next)?;
+        assert_eq!(left.map(|released| released.files), Some(2));
+        assert!(projection.links.is_empty());
+        assert_eq!(
+            fs::read_to_string(claude.join("skills/pdf/SKILL.md")).map_err(io(&claude))?,
+            "# PDF"
+        );
+        assert_eq!(found(&places), 2);
+        // The old pouch folder is untouched.
+        assert_eq!(dir.read()?.0.len(), 2);
         Ok(())
     }
 }

@@ -312,11 +312,20 @@ async fn run_with(ctx: &Context, session: &mut Session, mut record: SetupRecord)
 
     let root = pouch_dir(ctx, &record.pouch_id);
     ctx.home.ensure_private_dir(&root)?;
-    project::set_current(&ctx.home, &root)?;
     let dir = PouchDir::new(&root);
     let places = places(ctx)?;
     let backups = backups_dir(ctx);
     let mut projection = Projection::load(&ctx.home);
+    if !record.done {
+        // Set up afresh (a new login, another account or server): what the
+        // assistants have from the pouch used so far is theirs again, and the
+        // first sync treats it like anything else they have.
+        let places = places.clone();
+        let targets = tokio::task::spawn_blocking(move || sp_harness::targets(&places)).await?;
+        sp_sync::release::leave_pouch(&ctx.home, &mut projection, &targets, &root)?;
+        projection.save(&ctx.home)?;
+    }
+    project::set_current(&ctx.home, &root)?;
     // Edits made in copies (Gemini's TOML commands, Windows without links)
     // go into the pouch folder first, so this sync sends them.
     projection.pull_copies()?;
