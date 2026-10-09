@@ -13,10 +13,10 @@ workspace = true
 blake3 = "1.8.7"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
-sp-api = { version = "0.1.0", path = "../sp-api" }
-sp-core = { version = "0.1.0", path = "../sp-core" }
-sp-crypto = { version = "0.1.0", path = "../sp-crypto" }
-sp-harness = { version = "0.1.0", path = "../sp-harness" }
+sp-api = { path = "../sp-api" }
+sp-core = { path = "../sp-core" }
+sp-crypto = { path = "../sp-crypto" }
+sp-harness = { path = "../sp-harness" }
 thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["formatting", "parsing"] }
 toml = "1.1.7"
