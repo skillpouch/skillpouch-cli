@@ -253,6 +253,12 @@ async fn remote_change(ctx: &Context, session: &mut Session, report: &Report) {
             Ok(page) if page.events.is_empty() && page.high_water <= report.cursor => {}
             // Something new, or the cursor/epoch moved under us: sync.
             Ok(_) => return,
+            // Expired or replaced: wait on with a fresh token.
+            Err(error) if error.code() == Some("token_invalid") => {
+                if session.access_token(ctx, true).await.is_err() {
+                    return;
+                }
+            }
             Err(error) if error.code().is_some() => return,
             Err(_) => {
                 tokio::time::sleep(Duration::from_secs(15)).await;

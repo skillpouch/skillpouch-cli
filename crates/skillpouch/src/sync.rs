@@ -199,7 +199,12 @@ pub async fn run(ctx: &Context, session: &mut Session) -> Result<Report> {
         .filter(|saved| saved.device_id == record.device_id)
         .ok_or(Stopped::NotSetUp)?;
     mark(ctx, Phase::Syncing, Some(&record.pouch_id), None);
-    let result = run_with(ctx, session, record).await;
+    let mut result = run_with(ctx, session, record.clone()).await;
+    // The token ran out or was replaced mid-sync: a fresh one, then once more.
+    if result.as_ref().is_err_and(token_rejected) {
+        session.access_token(ctx, true).await?;
+        result = run_with(ctx, session, record).await;
+    }
     match &result {
         Ok(report) => {
             let mut status = base_status(ctx, Phase::Idle, Some(&report.pouch_id));
@@ -220,6 +225,22 @@ pub async fn run(ctx: &Context, session: &mut Session) -> Result<Report> {
         }
     }
     result
+}
+
+/// The server refused the access token (expired, or replaced by a refresh
+/// in another process); a fresh one fixes it.
+fn token_rejected(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<SyncError>()
+            .and_then(SyncError::code)
+            .or_else(|| {
+                cause
+                    .downcast_ref::<sp_api::ApiError>()
+                    .and_then(sp_api::ApiError::code)
+            })
+            == Some("token_invalid")
+    })
 }
 
 /// The phase and words for a failed sync.
@@ -841,6 +862,24 @@ mod tests {
             daemon_pid: Some(1),
             updated_at: "2026-10-09T11:55:00Z".into(),
         }
+    }
+
+    #[test]
+    fn a_rejected_token_is_told_apart_from_other_failures() {
+        let rejected = |code: &str| {
+            anyhow::Error::from(SyncError::Api(Box::new(sp_api::ApiError::Server {
+                code: code.into(),
+                status: 401,
+                message: String::new(),
+                details: None,
+                retryable: false,
+            })))
+        };
+        assert!(token_rejected(&rejected("token_invalid")));
+        assert!(token_rejected(
+            &rejected("token_invalid").context("syncing")
+        ));
+        assert!(!token_rejected(&rejected("device_revoked")));
     }
 
     #[test]
