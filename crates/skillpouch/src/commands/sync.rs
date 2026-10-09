@@ -24,11 +24,24 @@ pub async fn once(ctx: &Context) -> Result<ExitCode> {
             report.sent,
             report.received,
             if report.conflicts > 0 {
-                format!(", {} kept as -conflict copies", report.conflicts)
+                format!(", {} changed in two places", report.conflicts)
             } else {
                 String::new()
             }
         ));
+    }
+    if let Some(open) = report.open_conflicts.filter(|open| *open > 0) {
+        let url = format!(
+            "{}{}",
+            ctx.client.base(),
+            crate::sync::conflicts_path(&report.pouch_id)
+        );
+        ui::warn(format!(
+            "{} changed in two places. Pick the version to keep: {}",
+            crate::sync::conflict_words(open),
+            ui::accent(&url)
+        ));
+        ui::hint("Or run `skillpouch conflicts` to open it.");
     }
     if !report.removed.is_empty() {
         ui::hint(format!(
@@ -114,5 +127,25 @@ pub fn status(ctx: &Context) -> Result<ExitCode> {
         ui::dim("Log"),
         ctx.home.logs_dir().join("sync.log").display()
     );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `skillpouch conflicts`: opens the web app where conflicts are resolved.
+pub fn conflicts(ctx: &Context) -> Result<ExitCode> {
+    let record = sp_core::setup::SetupRecord::load(&ctx.home)?.ok_or(sync::Stopped::NotSetUp)?;
+    let url = format!(
+        "{}{}",
+        ctx.client.base(),
+        sync::conflicts_path(&record.pouch_id)
+    );
+    let open = SyncStatus::load(&ctx.home).map_or(0, |status| status.conflicts);
+    if open == 0 {
+        ui::success("No conflicts in this computer's pouch.");
+    }
+    if crate::browser::open(&url) {
+        ui::hint(format!("Opened {}", ui::accent(&url)));
+    } else {
+        ui::hint(format!("Open {}", ui::accent(&url)));
+    }
     Ok(ExitCode::SUCCESS)
 }

@@ -51,6 +51,8 @@ pub enum Command {
     },
     /// Sync this computer's pouch now.
     Sync,
+    /// Open the web app to pick versions of items changed in two places.
+    Conflicts,
     /// Choose what this computer syncs: assistants and kinds, on or off.
     /// Without options, lists the current choice.
     Select {

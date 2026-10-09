@@ -430,6 +430,10 @@ impl App {
                 Outcome::Send(Request::Refresh)
             }
             KeyCode::Char('o') => self.open(&self.web_path()),
+            KeyCode::Char('c') => match self.conflicts_path() {
+                Some(path) => self.open(&path),
+                None => Outcome::Nothing,
+            },
             KeyCode::Enter | KeyCode::Char(' ') if self.tab == Tab::Sync => self.toggle_choice(),
             KeyCode::Enter if self.tab == Tab::Pouches => self.use_selected_pouch(),
             KeyCode::Enter if self.tab == Tab::Account => {
@@ -460,6 +464,11 @@ impl App {
 impl App {
     /// Makes the selected pouch the one this computer syncs. The dashboard
     /// shows it right away; the next load confirms it.
+    /// Where the open conflicts are resolved, when there are any.
+    pub fn conflicts_path(&self) -> Option<String> {
+        self.dashboard()?.sync.as_ref()?.conflicts.clone()
+    }
+
     /// Flips the selected assistant or kind on the Sync tab (shown at once;
     /// the CLI saves it and hands items back to the assistant).
     fn toggle_choice(&mut self) -> Outcome {

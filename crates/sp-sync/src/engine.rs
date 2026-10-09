@@ -3,8 +3,10 @@
 //!
 //! An item changed on one side only goes the other way. Changed on both
 //! sides, the server's version is written to the folder and this computer's
-//! is kept next to it as `<name>-conflict`, which the next sync sends as a
-//! new item: nothing is ever lost.
+//! is sent on top of the version both last agreed on: the server keeps it as
+//! an open conflict that someone resolves in the web app, picking a version.
+//! Items two sides bring the first time they meet have no common version;
+//! this computer's is kept as `<name>-conflict` then. Nothing is ever lost.
 
 use crate::Result;
 use crate::item::{self, Files, LocalItem, PouchDir, Skipped};
@@ -53,8 +55,12 @@ pub struct Plan {
     pub receive: Vec<String>,
     /// Folder items the server deleted.
     pub remove: Vec<String>,
-    /// Both sides changed: the folder gets the server's, the local one is copied.
+    /// Both sides changed since they agreed: the folder gets the server's,
+    /// and the local one goes to the server as a conflict (in `send`).
     pub conflicts: Vec<String>,
+    /// Both sides have it, first time they meet, different: the folder gets
+    /// the server's, the local one is copied as `<name>-conflict`.
+    pub copies: Vec<String>,
     /// Already equal: just remember it.
     pub agree: Vec<String>,
     /// Gone on both sides.
@@ -101,12 +107,21 @@ pub fn plan(
                         let theirs_changed = theirs.revision_id != agreed.revision_id;
                         match (mine_changed, theirs_changed) {
                             (true, false) => plan.send.push(update()),
-                            (true, true) => plan.conflicts.push(key.clone()),
+                            (true, true) => {
+                                // On top of the agreed version: a conflict on the server.
+                                let mut base = theirs.clone();
+                                base.revision_id.clone_from(&agreed.revision_id);
+                                plan.send.push(Change::Update {
+                                    base,
+                                    files: mine.item.files.clone(),
+                                });
+                                plan.conflicts.push(key.clone());
+                            }
                             (false, _) => plan.receive.push(key.clone()),
                         }
                     }
                     None if options.prefer == Prefer::Computer => plan.send.push(update()),
-                    None => plan.conflicts.push(key.clone()),
+                    None => plan.copies.push(key.clone()),
                 }
             }
             (Some(mine), None) => {
@@ -189,8 +204,8 @@ pub async fn sync(
         }
     }
 
-    // Conflicts: keep this computer's copy under a new name first.
-    for key in &plan.conflicts {
+    // First meetings: keep this computer's copy under a new name first.
+    for key in &plan.copies {
         let Some(mine) = local.get(key) else { continue };
         let taken = |name: &str| {
             local.contains_key(&item::key(&mine.item.kind, name))
@@ -244,6 +259,8 @@ pub async fn sync(
                         }
                     }
                 }
+                // Ours was stale: the server keeps it as an open conflict.
+                Committed::Conflict if plan.conflicts.contains(&key) => outcome.conflicts += 1,
                 Committed::Conflict => outcome.again = true,
                 Committed::Rejected(reason) => outcome.rejected.push(format!("{key}: {reason}")),
             }
@@ -254,6 +271,7 @@ pub async fn sync(
         .receive
         .iter()
         .chain(&plan.conflicts)
+        .chain(&plan.copies)
         .filter_map(|key| remote_items.get(key))
         .collect();
     if !incoming.is_empty() {
@@ -473,15 +491,20 @@ mod tests {
         );
         let plan_ = plan(&local, &remote, &state, Options::default());
         assert_eq!(plan_.conflicts, ["skill/pdf"]);
+        // Sent on top of the agreed version, so the server opens a conflict.
+        let [Change::Update { base, .. }] = plan_.send.as_slice() else {
+            panic!("expected one update, got {}", plan_.send.len());
+        };
+        assert_eq!(base.revision_id, "r1");
 
-        // First meeting (no agreement yet): conflict by default...
+        // First meeting (no agreement yet): a `-conflict` copy by default...
         let (local, remote, state) = sides(
             &[local_item("pdf", "mine")],
             &[remote_item("pdf", "r2", "theirs", false)],
             &[],
         );
         assert_eq!(
-            plan(&local, &remote, &state, Options::default()).conflicts,
+            plan(&local, &remote, &state, Options::default()).copies,
             ["skill/pdf"]
         );
         // ...or this computer's version when it replaces the pouch.

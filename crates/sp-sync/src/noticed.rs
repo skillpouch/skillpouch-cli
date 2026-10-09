@@ -24,8 +24,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Links of ours that may vanish from one folder at once before it looks
-/// like the folder was wiped (a reinstall) rather than items deleted.
+/// Links of ours that may vanish at once (from one folder, or half of all
+/// of them) before it looks like a wipe rather than items deleted.
 const WIPE_AT: usize = 3;
 
 /// An item to take out of the pouch.
@@ -194,6 +194,24 @@ pub fn noticed(
                 }
             }
         }
+    }
+    // Many of ours gone in one go looks like a cleanup, a reinstall or
+    // another tool at work, not like someone deleting things one by one.
+    let ours = previous.links.len() + previous.copies.len();
+    let is_file = |removed: &Removed| {
+        previous.links.contains_key(&removed.at) || previous.copies.contains_key(&removed.at)
+    };
+    let files = found
+        .removed
+        .iter()
+        .filter(|removed| is_file(removed))
+        .count();
+    if files >= WIPE_AT && files * 2 >= ours {
+        found.held_back.push(format!(
+            "{files} SkillPouch items disappeared from your assistants at once, so they were \
+             linked again instead of deleted; delete them one by one, or in the pouch"
+        ));
+        found.removed.retain(|removed| !is_file(removed));
     }
     Ok(found)
 }
@@ -390,6 +408,19 @@ mod tests {
         fs::create_dir_all(&skills).map_err(io(&skills))?;
         let found = check(&s)?;
         assert!(removed(&found).is_empty());
+        assert_eq!(found.held_back.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn many_disappearing_at_once_is_not_a_mass_delete() -> Result<()> {
+        let s = setup(&["a", "b"])?;
+        for path in ["skills/a", "skills/b", "agents/reviewer.md"] {
+            let link = s.claude.join(path);
+            fs::remove_file(&link).map_err(io(&link))?;
+        }
+        let found = check(&s)?;
+        assert!(removed(&found).is_empty(), "{found:?}");
         assert_eq!(found.held_back.len(), 1);
         Ok(())
     }

@@ -34,7 +34,7 @@ pub struct SyncStatus {
     pub sent: usize,
     #[serde(default)]
     pub received: usize,
-    /// Items both sides changed; this computer's copy was kept as `<name>-conflict`.
+    /// Conflicts in the pouch waiting to be resolved in the web app.
     #[serde(default)]
     pub conflicts: usize,
     /// The background process keeping this up to date.

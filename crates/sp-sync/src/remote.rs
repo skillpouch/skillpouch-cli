@@ -475,6 +475,16 @@ impl<'a> Remote<'a> {
         Ok(())
     }
 
+    /// How many conflicts wait to be resolved in the web app.
+    pub async fn open_conflicts(&self) -> Result<usize> {
+        Ok(self
+            .client
+            .open_conflicts(self.key, &self.token, &self.pouch.id)
+            .await?
+            .conflicts
+            .len())
+    }
+
     /// Tells the server this computer has everything up to `seq`.
     pub async fn acknowledge(&self, seq: u64) -> Result<()> {
         Ok(self

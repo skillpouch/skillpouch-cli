@@ -308,3 +308,18 @@ pub struct EventPage {
     pub high_water: u64,
     pub epoch: String,
 }
+
+/// Two versions of an item the server keeps until someone picks one.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConflictRecord {
+    pub id: String,
+    pub artifact_id: Option<String>,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConflictList {
+    pub conflicts: Vec<ConflictRecord>,
+}

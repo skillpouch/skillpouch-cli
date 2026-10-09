@@ -142,6 +142,9 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
         Tab::Account => pairs.push(("enter", "select")),
         _ => {}
     }
+    if app.conflicts_path().is_some() {
+        pairs.push(("c", "resolve conflicts"));
+    }
     pairs.extend([("o", "open in browser"), ("r", "refresh"), ("q", "quit")]);
     frame.render_widget(Paragraph::new(keys(&pairs)), area);
     draw_notice(app, frame, area);
@@ -306,12 +309,35 @@ pub(crate) mod tests {
             tone: crate::model::SyncTone::Warn,
             text: "Offline".into(),
             detail: Some("Can't reach the server · last synced 5 min ago".into()),
+            conflicts: None,
         })));
         let text = screen(&app, 120, 40);
         contains_all(&text, &["Sync", "Offline", "last synced 5 min ago"]);
         // Not set up (or signed out): no sync line at all.
         app.apply(Update::Sync(None));
         assert!(!screen(&app, 120, 40).contains("Offline"));
+    }
+
+    #[test]
+    fn conflicts_open_the_web_app_with_c() {
+        let mut app = ready();
+        app.apply(Update::Sync(Some(crate::model::SyncView {
+            tone: crate::model::SyncTone::Warn,
+            text: "Synced just now".into(),
+            detail: Some(
+                "1 item changed in two places: press c to pick versions in the web app".into(),
+            ),
+            conflicts: Some("/app/p/p1/conflicts".into()),
+        })));
+        contains_all(
+            &screen(&app, 120, 40),
+            &["changed in two places", "c resolve conflicts"],
+        );
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
+        assert!(matches!(
+            app.on_key(key),
+            crate::app::Outcome::Send(crate::model::Request::Open(url)) if url == "https://skillpouch.net/app/p/p1/conflicts"
+        ));
     }
 
     #[test]

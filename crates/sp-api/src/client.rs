@@ -1,7 +1,7 @@
 use crate::types::{
     ArtifactList, ArtifactRecord, BlobCheck, BlobMissing, CliAuthCreate, CliAuthCreated,
-    CliAuthToken, CommitRequest, CommitResponse, DeviceList, DeviceTokens, EventPage, KeyEnvelopes,
-    Me, PouchList, Roster, UsageReport, UsageSummary,
+    CliAuthToken, CommitRequest, CommitResponse, ConflictList, DeviceList, DeviceTokens, EventPage,
+    KeyEnvelopes, Me, PouchList, Roster, UsageReport, UsageSummary,
 };
 use crate::{ApiError, Result};
 use reqwest::{Method, StatusCode};
@@ -323,6 +323,17 @@ impl Client {
             ..Call::new(Method::GET, &path, key)
         })
         .await
+    }
+
+    /// The pouch's open conflicts.
+    pub async fn open_conflicts(
+        &self,
+        key: &SignKey,
+        access_token: &str,
+        pouch_id: &str,
+    ) -> Result<ConflictList> {
+        let path = format!("/v1/pouches/{pouch_id}/conflicts?state=open");
+        self.get(&path, key, access_token).await
     }
 
     /// Tells the server (and the web's device list) how far this computer synced.

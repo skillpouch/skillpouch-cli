@@ -33,6 +33,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         } => login::run(&ctx, token, name, no_browser).await,
         Command::Select { on, off } => select::select(&ctx, &on, &off),
         Command::Unlink { assistant } => select::unlink(&ctx, assistant.as_deref()),
+        Command::Conflicts => sync::conflicts(&ctx),
         Command::Logout => logout::run(&ctx).await,
         Command::Status { json } => status::run(&ctx, json).await,
         Command::Sync => sync::once(&ctx).await,

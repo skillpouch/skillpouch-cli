@@ -33,6 +33,9 @@ pub struct Report {
     pub sent: usize,
     pub received: usize,
     pub conflicts: usize,
+    /// Conflicts in the pouch waiting for someone to pick a version on the
+    /// web (`None`: couldn't ask).
+    pub open_conflicts: Option<usize>,
     pub linked: usize,
     pub backed_up: Vec<PathBuf>,
     /// Things left alone, each with why.
@@ -71,7 +74,12 @@ pub fn view(
     let last = status
         .and_then(|status| status.last_synced_at.as_deref())
         .and_then(|at| crate::when::ago(at, now));
-    let line = |tone, text: String, detail: Option<String>| SyncView { tone, text, detail };
+    let line = |tone, text: String, detail: Option<String>| SyncView {
+        tone,
+        text,
+        detail,
+        conflicts: None,
+    };
     let not_running =
         || Some("Background sync isn't running: `skillpouch daemon start`".to_string());
     let Some(status) = status else {
@@ -105,20 +113,24 @@ pub fn view(
             last.map_or("Not synced yet".into(), |last| format!("Synced {last}")),
             not_running(),
         ),
+        _ if status.conflicts > 0 => SyncView {
+            conflicts: status.pouch_id.as_deref().map(conflicts_path),
+            ..line(
+                SyncTone::Warn,
+                last.map_or("Up to date".into(), |last| format!("Synced {last}")),
+                Some(format!(
+                    "{} changed in two places: press c to pick versions in the web app",
+                    conflict_words(status.conflicts)
+                )),
+            )
+        },
         _ => line(
             SyncTone::Good,
             last.map_or("Up to date".into(), |last| format!("Synced {last}")),
-            if status.conflicts > 0 {
-                Some(format!(
-                    "{} item(s) changed on both sides; this computer's copy ends in -conflict",
-                    status.conflicts
-                ))
-            } else {
-                status
-                    .message
-                    .as_deref()
-                    .map(|m| m.lines().next().unwrap_or(m).to_string())
-            },
+            status
+                .message
+                .as_deref()
+                .map(|m| m.lines().next().unwrap_or(m).to_string()),
         ),
     })
 }
@@ -159,6 +171,20 @@ fn backups_dir(ctx: &Context) -> PathBuf {
     ctx.home.root().join("backups").join(stamp)
 }
 
+/// Where the web app resolves a pouch's conflicts.
+pub fn conflicts_path(pouch_id: &str) -> String {
+    format!("/app/p/{pouch_id}/conflicts")
+}
+
+/// `1 item`, `3 items`.
+pub fn conflict_words(count: usize) -> String {
+    if count == 1 {
+        "1 item".into()
+    } else {
+        format!("{count} items")
+    }
+}
+
 /// Syncs once. The status file says what happened either way.
 pub async fn run(ctx: &Context, session: &mut Session) -> Result<Report> {
     let record = SetupRecord::load(&ctx.home)?
@@ -182,7 +208,9 @@ pub async fn run(ctx: &Context, session: &mut Session) -> Result<Report> {
             if report.sent + report.received + report.conflicts > 0 {
                 status.sent = report.sent;
                 status.received = report.received;
-                status.conflicts = report.conflicts;
+            }
+            if let Some(open) = report.open_conflicts {
+                status.conflicts = open;
             }
             let _ = status.save(&ctx.home);
         }
@@ -414,6 +442,7 @@ async fn run_with(ctx: &Context, session: &mut Session, mut record: SetupRecord)
     }
     report.cursor = state.cursor;
     report.epoch = state.epoch.clone();
+    report.open_conflicts = remote.open_conflicts().await.ok();
     // Only for the web's device list; a failure here doesn't matter.
     let _ = remote.acknowledge(state.cursor).await;
     Ok(report)

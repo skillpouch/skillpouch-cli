@@ -115,6 +115,8 @@ pub struct SyncView {
     /// `Synced 2 min ago`, `Syncing…`, `Offline`.
     pub text: String,
     pub detail: Option<String>,
+    /// Web app path where open conflicts are resolved (`c` opens it).
+    pub conflicts: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
