@@ -2,7 +2,8 @@
 //! receives HPKE-sealed messages (the welcome, key envelopes).
 
 use crate::{CryptoError, Result, b64};
-use p256::ecdsa::SigningKey;
+use p256::ecdsa::signature::{Signer, Verifier};
+use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
 use p256::elliptic_curve::Generate;
 use p256::elliptic_curve::sec1::ToSec1Point;
 use p256::{PublicKey, SecretKey};
@@ -43,6 +44,35 @@ impl PublicJwk {
     pub fn thumbprint(&self) -> String {
         b64::encode(Sha256::digest(self.canonical().as_bytes()))
     }
+
+    /// The uncompressed SEC1 point (`0x04 ‖ x ‖ y`).
+    pub fn point(&self) -> Result<Vec<u8>> {
+        let x = b64::decode(&self.x).filter(|x| x.len() == 32);
+        let y = b64::decode(&self.y).filter(|y| y.len() == 32);
+        let (Some(x), Some(y)) = (x, y) else {
+            return Err(CryptoError::InvalidKey);
+        };
+        Ok([&[4u8][..], &x, &y].concat())
+    }
+
+    /// Checks a raw (64-byte, base64url) ES256 signature over `context ‖ message`,
+    /// as `@skillpouch/crypto` signs roster statements and key envelopes.
+    pub fn verifies(&self, signature: &str, context: &str, message: &[u8]) -> bool {
+        let Ok(point) = self.point() else {
+            return false;
+        };
+        let Ok(key) = VerifyingKey::from_sec1_bytes(&point) else {
+            return false;
+        };
+        let Some(signature) = b64::decode(signature)
+            .filter(|bytes| bytes.len() == 64)
+            .and_then(|bytes| Signature::from_slice(&bytes).ok())
+        else {
+            return false;
+        };
+        key.verify(&[context.as_bytes(), message].concat(), &signature)
+            .is_ok()
+    }
 }
 
 fn secret_from_b64(text: &str) -> Result<SecretKey> {
@@ -77,6 +107,22 @@ impl SignKey {
     pub(crate) fn signing_key(&self) -> &SigningKey {
         &self.0
     }
+
+    /// A raw ES256 signature (base64url) over `context ‖ message`: how
+    /// members sign revisions, as `PublicJwk::verifies` checks them.
+    pub fn sign(&self, context: &str, message: &[u8]) -> String {
+        let signature: Signature = self.0.sign(&[context.as_bytes(), message].concat());
+        b64::encode(signature.to_bytes())
+    }
+
+    /// A detached compact JWS (`header..signature`) over `payload`, as the
+    /// `Skillpouch-Signature` header of a commit.
+    pub fn detached_jws(&self, payload: &[u8]) -> String {
+        let header = b64::encode(br#"{"alg":"ES256"}"#);
+        let signing_input = format!("{header}.{}", b64::encode(payload));
+        let signature: Signature = self.0.sign(signing_input.as_bytes());
+        format!("{header}..{}", b64::encode(signature.to_bytes()))
+    }
 }
 
 /// The HPKE recipient key (DHKEM P-256).
@@ -100,6 +146,10 @@ impl EncKey {
 
     pub fn public_jwk(&self) -> Result<PublicJwk> {
         PublicJwk::of(&self.0.public_key())
+    }
+
+    pub(crate) fn scalar(&self) -> Vec<u8> {
+        self.0.to_bytes().to_vec()
     }
 }
 
@@ -133,6 +183,20 @@ mod tests {
         assert_eq!(jwk, enc.public_jwk()?);
         assert_eq!(b64::decode(&jwk.x).map(|x| x.len()), Some(32));
         assert_ne!(sign.public_jwk()?, jwk);
+        Ok(())
+    }
+
+    #[test]
+    fn signatures_verify_under_their_context() -> Result<()> {
+        let key = SignKey::generate()?;
+        let jwk = key.public_jwk()?;
+        let signature = key.sign("skillpouch/v1/revision-sig", b"message");
+        assert!(jwk.verifies(&signature, "skillpouch/v1/revision-sig", b"message"));
+        assert!(!jwk.verifies(&signature, "skillpouch/v1/roster", b"message"));
+        let jws = key.detached_jws(b"digest");
+        let parts: Vec<&str> = jws.split('.').collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[1], "");
         Ok(())
     }
 

@@ -1,7 +1,7 @@
 //! The terminal UI: what `skillpouch` opens in an interactive terminal. A
-//! dashboard of the account, its pouches and computers, and this computer's
-//! assistants; logging in and out happen inside it. Every command still works
-//! without it.
+//! dashboard of the account, its pouches, token usage and computers; logging
+//! in and out, and setting up what this computer syncs, happen inside it.
+//! Every command still works without it.
 //!
 //! The TUI doesn't talk to the server itself: it sends [`Request`]s and draws
 //! the [`Update`]s it gets back.
@@ -10,12 +10,14 @@ mod app;
 pub mod logo;
 pub mod mascot;
 mod model;
+mod setup;
 mod theme;
+pub mod usage;
 mod view;
 
 pub use model::{
-    Account, Assistant, Computer, Dashboard, Launch, LoginStep, Notice, Pouch, Request, Tone,
-    Update,
+    Account, Computer, Dashboard, FirstSync, Launch, LoginStep, Notice, Pouch, Request,
+    SetupChoice, SyncTone, SyncView, Tone, Update, WaitingView,
 };
 
 use app::{App, Outcome, Status};
@@ -61,6 +63,7 @@ pub fn run(
         }
         if matches!(app.status, Status::Ready(_))
             && app.login.is_none()
+            && app.setup.is_none()
             && !app.confirm_logout
             && !app.refreshing
             && refreshed.elapsed() >= REFRESH_EVERY

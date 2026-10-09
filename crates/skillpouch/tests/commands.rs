@@ -104,7 +104,7 @@ fn logging_in_again_replaces_the_login_instead_of_refusing()
     let token = format!("sp_lt_{}", "a".repeat(32));
     let output = skillpouch(&home)?.args(["login", &token]).output()?;
     assert!(
-        stdout(&output).contains("replaces it with new keys"),
+        stdout(&output).contains("Replaces the login"),
         "{}",
         stdout(&output)
     );

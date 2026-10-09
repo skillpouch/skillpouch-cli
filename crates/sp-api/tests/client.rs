@@ -1,5 +1,5 @@
 use serde_json::{Value, json};
-use sp_api::types::CliAuthToken;
+use sp_api::types::{CliAuthToken, UsageCounts, UsageReport, UsageRow};
 use sp_api::{ApiError, Client};
 use sp_crypto::SignKey;
 use sp_crypto::{b64, dpop::access_token_hash};
@@ -42,6 +42,7 @@ fn nonce_guard(data: Value) -> impl Fn(&Request) -> ResponseTemplate {
     }
 }
 
+#[allow(clippy::result_large_err)] // a test helper
 fn client(server: &MockServer) -> Result<Client, ApiError> {
     Client::new(&server.uri(), "skillpouch-test")
 }
@@ -152,6 +153,7 @@ async fn parses_an_approved_login() -> Result<(), Box<dyn std::error::Error>> {
             "refresh_token": "r",
             "device_id": "d",
             "storage_account_id": "s",
+            "member_id": "m",
             "welcome": "sealed"
         })))
         .mount(&server)
@@ -165,8 +167,12 @@ async fn parses_an_approved_login() -> Result<(), Box<dyn std::error::Error>> {
         return Err("expected approved".into());
     };
     assert_eq!(
-        (tokens.device_id.as_str(), welcome.as_str()),
-        ("d", "sealed")
+        (
+            tokens.device_id.as_str(),
+            tokens.member_id.as_deref(),
+            welcome.as_str()
+        ),
+        ("d", Some("m"), "sealed")
     );
     let body: Value = server.received_requests().await.unwrap_or_default()[0].body_json()?;
     assert_eq!(
@@ -194,5 +200,59 @@ async fn logs_this_computer_out() -> Result<(), Box<dyn std::error::Error>> {
     let last = requests.last().ok_or("no request")?;
     assert_eq!(claims(last)["htm"], "POST");
     assert_eq!(claims(last)["ath"], access_token_hash("access-123"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn reports_usage_and_reads_the_sum() -> Result<(), Box<dyn std::error::Error>> {
+    let server = MockServer::start().await;
+    let source = "a".repeat(32);
+    Mock::given(method("PUT"))
+        .and(path(format!("/v1/usage/sources/{source}")))
+        .respond_with(nonce_guard(json!({ "stored": 1 })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/usage"))
+        .respond_with(nonce_guard(json!({
+            "days": [{ "day": "2026-10-09", "assistant": "codex", "model": "gpt-6",
+                       "input": 1, "output": 2, "cache_read": 3, "cache_write": 0 }],
+            "all_time": { "input": 1, "output": 2, "cache_read": 3, "cache_write": 0 },
+            "updated_at": null
+        })))
+        .mount(&server)
+        .await;
+    let client = client(&server)?;
+    let key = SignKey::generate()?;
+    let row = UsageRow {
+        day: "2026-10-09".into(),
+        assistant: "codex".into(),
+        model: "gpt-6".into(),
+        counts: UsageCounts {
+            input: 1,
+            output: 2,
+            cache_read: 3,
+            cache_write: 0,
+        },
+    };
+
+    client
+        .report_usage(
+            &key,
+            "t",
+            &source,
+            &UsageReport {
+                rows: vec![row.clone()],
+            },
+        )
+        .await?;
+    let requests = server.received_requests().await.unwrap_or_default();
+    let sent: Value = serde_json::from_slice(&requests.last().ok_or("no request")?.body)?;
+    assert_eq!(sent["rows"][0]["cache_read"], 3);
+    assert_eq!(sent["rows"][0]["day"], "2026-10-09");
+
+    let summary = client.usage(&key, "t").await?;
+    assert_eq!(summary.days, [row]);
+    assert_eq!(summary.all_time.output, 2);
     Ok(())
 }

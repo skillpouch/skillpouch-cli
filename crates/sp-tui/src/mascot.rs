@@ -247,24 +247,64 @@ fn pixel(x: i32, y: i32, pose: &Pose) -> Option<Color> {
     Some(face(sx, sy, pose).unwrap_or(PURPLE))
 }
 
-/// The pose drawn as `HEIGHT` lines of `WIDTH` cells.
-pub fn render(pose: &Pose) -> Vec<Line<'static>> {
+/// One terminal cell of the pouch: a half block and its colours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cell {
+    pub ch: char,
+    pub fg: Option<Rgb>,
+    pub bg: Option<Rgb>,
+}
+
+pub type Rgb = (u8, u8, u8);
+
+fn rgb(color: Color) -> Rgb {
+    match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => BRAND,
+    }
+}
+
+/// The pose as `HEIGHT` rows of `WIDTH` cells, for drawing outside ratatui.
+pub fn cells(pose: &Pose) -> Vec<Vec<Cell>> {
     (0..CANVAS_H / 2)
         .map(|row| {
-            let spans: Vec<Span> = (0..CANVAS_W)
+            (0..CANVAS_W)
                 .map(|x| {
                     let top = pixel(x, row * 2, pose);
                     let bottom = pixel(x, row * 2 + 1, pose);
-                    match (top, bottom) {
-                        (None, None) => Span::raw(" "),
-                        (Some(top), None) => Span::styled("▀", Style::new().fg(top)),
-                        (None, Some(bottom)) => Span::styled("▄", Style::new().fg(bottom)),
-                        (Some(top), Some(bottom)) if top == bottom => {
-                            Span::styled("█", Style::new().fg(top))
-                        }
-                        (Some(top), Some(bottom)) => {
-                            Span::styled("▀", Style::new().fg(top).bg(bottom))
-                        }
+                    let (ch, fg, bg) = match (top, bottom) {
+                        (None, None) => (' ', None, None),
+                        (Some(top), None) => ('▀', Some(rgb(top)), None),
+                        (None, Some(bottom)) => ('▄', Some(rgb(bottom)), None),
+                        (Some(top), Some(bottom)) if top == bottom => ('█', Some(rgb(top)), None),
+                        (Some(top), Some(bottom)) => ('▀', Some(rgb(top)), Some(rgb(bottom))),
+                    };
+                    Cell { ch, fg, bg }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The pose drawn as `HEIGHT` lines of `WIDTH` cells.
+pub fn render(pose: &Pose) -> Vec<Line<'static>> {
+    cells(pose)
+        .into_iter()
+        .map(|row| {
+            let spans: Vec<Span> = row
+                .into_iter()
+                .map(|cell| {
+                    let mut style = Style::new();
+                    if let Some((r, g, b)) = cell.fg {
+                        style = style.fg(Color::Rgb(r, g, b));
+                    }
+                    if let Some((r, g, b)) = cell.bg {
+                        style = style.bg(Color::Rgb(r, g, b));
+                    }
+                    if cell.fg.is_none() {
+                        Span::raw(" ")
+                    } else {
+                        Span::styled(cell.ch.to_string(), style)
                     }
                 })
                 .collect();

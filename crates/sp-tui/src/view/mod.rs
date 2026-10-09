@@ -1,9 +1,12 @@
-//! Drawing. Signed out (or logging in again): only the login screen.
+//! Drawing. Signed out (or logging in again): only the login screen. Being
+//! set up: only the setup screen.
 //! Signed in: a header with the tabs, the open tab, and a footer with keys
 //! and notices.
 
+mod chart;
 mod login;
 mod pages;
+mod setup;
 mod widgets;
 
 use crate::app::{App, Status, Tab};
@@ -29,6 +32,11 @@ pub fn draw(app: &App, frame: &mut Frame) {
         draw_notice(app, frame, area);
         return;
     }
+    if let (Some(setup), Some(dashboard)) = (&app.setup, app.dashboard()) {
+        setup::draw(app, setup, dashboard, frame, area);
+        draw_notice(app, frame, area);
+        return;
+    }
     let [header, _, body, _, footer] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(1),
@@ -42,13 +50,16 @@ pub fn draw(app: &App, frame: &mut Frame) {
     match app.tab {
         Tab::Overview => pages::overview(app, frame, body),
         Tab::Pouches => pages::pouches(app, frame, body),
+        Tab::Usage => pages::usage(app, frame, body),
         Tab::Computers => pages::computers(app, frame, body),
-        Tab::Assistants => pages::assistants(app, frame, body),
         Tab::Account => pages::account(app, frame, body),
     }
     draw_footer(app, frame, footer);
     if app.confirm_logout {
         draw_logout(frame, area);
+    }
+    if app.reviewing {
+        draw_review(app, frame, area);
     }
 }
 
@@ -120,12 +131,17 @@ fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
 
 fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
     let area = area.inner(Margin::new(2, 0));
-    let mut pairs = vec![("tab", "switch")];
-    if !matches!(app.tab, Tab::Overview) {
+    let mut pairs = vec![("←→", "switch")];
+    if matches!(app.tab, Tab::Pouches | Tab::Computers | Tab::Account) {
         pairs.push(("↑↓", "move"));
     }
-    if app.tab == Tab::Account {
-        pairs.push(("enter", "select"));
+    match app.tab {
+        Tab::Pouches => pairs.push(("enter", "sync here")),
+        Tab::Account => pairs.push(("enter", "select")),
+        _ => {}
+    }
+    if !app.waiting().is_empty() {
+        pairs.push(("a", "review hooks"));
     }
     pairs.extend([("o", "open in browser"), ("r", "refresh"), ("q", "quit")]);
     frame.render_widget(Paragraph::new(keys(&pairs)), area);
@@ -188,6 +204,54 @@ fn draw_logout(frame: &mut Frame, area: Rect) {
     );
 }
 
+/// The hooks and plugins waiting for approval, and what each runs.
+fn draw_review(app: &App, frame: &mut Frame, area: Rect) {
+    let waiting = app.waiting();
+    let mut lines = vec![
+        Line::styled("Let these run on this computer?", theme::strong()),
+        Line::styled(
+            "They came from your pouch, not from here, and run commands by themselves.",
+            theme::meta(),
+        ),
+        Line::default(),
+    ];
+    for item in waiting {
+        let mut label = vec![Span::styled(item.label.clone(), theme::accent())];
+        if item.changed {
+            label.push(Span::styled(
+                "  changed · the version you approved runs until then",
+                theme::meta(),
+            ));
+        }
+        lines.push(Line::from(label));
+        lines.push(Line::styled(format!("  {}", item.detail), theme::text()));
+    }
+    lines.push(Line::default());
+    lines.push(keys(&[("y", "let them run"), ("n", "not now")]));
+    let width = 76.min(area.width.saturating_sub(4));
+    let inner = usize::from(width.saturating_sub(6)).max(1);
+    // Wrapped detail lines take more than one row.
+    let rows: usize = lines
+        .iter()
+        .map(|line| line.width().div_ceil(inner).max(1))
+        .sum();
+    let height = u16::try_from(rows + 3)
+        .unwrap_or(u16::MAX)
+        .min(area.height.saturating_sub(2));
+    let rect = centered(area, width, height);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme::BORDER_STRONG))
+        .padding(Padding::new(2, 2, 1, 0));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
+        rect,
+    );
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -230,7 +294,7 @@ pub(crate) mod tests {
                 "q quit",
             ],
         );
-        for absent in ["Overview", "Pouches", "Claude Code"] {
+        for absent in ["Overview", "Pouches", "Tokens"] {
             assert!(!text.contains(absent), "{absent} shown:\n{text}");
         }
     }
@@ -261,31 +325,96 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_overview_shows_how_syncing_goes() {
+        let mut app = ready();
+        app.apply(Update::Sync(Some(crate::model::SyncView {
+            tone: crate::model::SyncTone::Warn,
+            text: "Offline".into(),
+            detail: Some("Can't reach the server · last synced 5 min ago".into()),
+            waiting: Vec::new(),
+        })));
+        let text = screen(&app, 120, 40);
+        contains_all(&text, &["Sync", "Offline", "last synced 5 min ago"]);
+        // Not set up (or signed out): no sync line at all.
+        app.apply(Update::Sync(None));
+        assert!(!screen(&app, 120, 40).contains("Offline"));
+    }
+
+    #[test]
+    fn waiting_hooks_are_shown_and_approved_with_a_key() {
+        let mut app = ready();
+        app.apply(Update::Sync(Some(crate::model::SyncView {
+            tone: crate::model::SyncTone::Good,
+            text: "Synced just now".into(),
+            detail: None,
+            waiting: vec![crate::model::WaitingView {
+                label: "Hook format".into(),
+                detail: "PostToolUse (Edit|Write): prettier --write .".into(),
+                changed: false,
+            }],
+        })));
+        contains_all(
+            &screen(&app, 120, 40),
+            &["1 hook waits for your OK", "a review hooks"],
+        );
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.on_key(key(KeyCode::Char('a')));
+        contains_all(
+            &screen(&app, 120, 40),
+            &[
+                "Let these run on this computer?",
+                "Hook format",
+                "prettier --write .",
+            ],
+        );
+        assert_eq!(
+            app.on_key(key(KeyCode::Char('y'))),
+            crate::app::Outcome::Send(crate::model::Request::Approve)
+        );
+        assert!(!app.reviewing);
+    }
+
+    #[test]
     fn every_tab_draws() {
         let mut app = ready();
         let expected: [&[&str]; 5] = [
             &[
-                "Welcome back, Ada",
-                "2 of 3",
-                "14",
-                "This computer",
+                "Hi, Ada",
+                "Work stuff",
                 "up to date",
+                "2 of 3",
+                "1.5 KB of 1.0 GB",
+                "Tokens",
+                "This week 3.5K",
+                "All time 15.5K",
+                "Mon ",
             ],
-            &["Pouch 1", "Locked", "12", "9 events behind", "3 min ago"],
+            &[
+                "● Work stuff",
+                "Pouch 2",
+                "Locked",
+                "Skills for the day job",
+                "This computer syncs this pouch.",
+                "laptop        up to date",
+            ],
+            &[
+                "This week",
+                "3.5K",
+                "Last 53 days",
+                "peak 8.0K on Sep 30",
+                "claude-sonnet",
+                "This month by assistant",
+                "3.8K output",
+            ],
             &[
                 "desktop",
-                "Windows x86_64",
+                "Work stuff",
                 "2 days ago",
                 "this computer",
+                "Linux x86_64",
                 "1 trusted browser",
             ],
-            &["Claude Code", "~/.claude", "Codex", "Not found", "1 of 2"],
-            &[
-                "ada@example.com",
-                "Log in again with new keys",
-                "Log out",
-                "2 of 3",
-            ],
+            &["ada@example.com", "Log in again with new keys", "Log out"],
         ];
         for (index, expected) in expected.iter().enumerate() {
             app.tab = Tab::ALL[index];
@@ -293,6 +422,32 @@ pub(crate) mod tests {
             contains_all(&text, expected);
             contains_all(&text, &["SkillPouch", "Ada Lovelace", "Supporter"]);
         }
+    }
+
+    #[test]
+    fn short_terminals_drop_the_mascot_and_keep_the_tokens() {
+        let app = ready();
+        let tall = screen(&app, 110, 34);
+        let short = screen(&app, 110, 26);
+        assert!(tall.contains("▄"), "{tall}");
+        assert!(
+            short.contains("Tokens") && short.contains("Active pouch"),
+            "{short}"
+        );
+    }
+
+    #[test]
+    fn missing_usage_and_names_say_why() {
+        let mut app = ready();
+        let mut dashboard = crate::app::tests::dashboard();
+        dashboard.usage = Err("Couldn't reach the server.".into());
+        dashboard.names_missing = Some("Log in again to see pouch names.".into());
+        app.apply(Update::Loaded(Box::new(dashboard)));
+        assert!(screen(&app, 110, 34).contains("Couldn't reach the server."));
+        app.tab = Tab::Usage;
+        assert!(screen(&app, 110, 34).contains("Token usage isn't available."));
+        app.tab = Tab::Pouches;
+        assert!(screen(&app, 110, 34).contains("Log in again to see pouch names."));
     }
 
     #[test]

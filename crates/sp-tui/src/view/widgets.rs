@@ -11,11 +11,6 @@ pub fn spinner(tick: usize) -> Span<'static> {
     Span::styled(SPINNER[tick % SPINNER.len()], theme::accent())
 }
 
-/// A section title inside a page.
-pub fn heading(text: &str) -> Line<'_> {
-    Line::styled(text, theme::strong())
-}
-
 /// `label    value`, the label in a fixed column.
 pub fn field<'a>(name: &str, value: impl Into<Vec<Span<'a>>>) -> Line<'a> {
     let mut spans = vec![Span::styled(format!("{name:<14}"), theme::meta())];

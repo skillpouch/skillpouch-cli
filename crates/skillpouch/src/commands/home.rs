@@ -9,6 +9,9 @@ use std::process::ExitCode;
 const COMMANDS: &[(&str, &str)] = &[
     ("login", "Connect this computer to your account"),
     ("status", "Account, plan and storage"),
+    ("sync", "Sync this computer's pouch now"),
+    ("daemon start", "Keep it in sync in the background"),
+    ("approve", "Let new hooks and plugins run here"),
     ("logout", "Forget this computer's keys"),
 ];
 

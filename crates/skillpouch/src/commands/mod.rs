@@ -1,10 +1,12 @@
+mod approve;
 mod home;
 mod login;
 mod logout;
 mod status;
+mod sync;
 mod tui;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, DaemonAction};
 use crate::context::Context;
 use anyhow::Result;
 use std::io::IsTerminal;
@@ -26,5 +28,13 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         } => login::run(&ctx, token, name, no_browser).await,
         Command::Logout => logout::run(&ctx).await,
         Command::Status { json } => status::run(&ctx, json).await,
+        Command::Sync => sync::once(&ctx).await,
+        Command::Approve { names, yes } => approve::run(&ctx, names, yes).await,
+        Command::Daemon { action } => match action {
+            DaemonAction::Start => sync::start(&ctx),
+            DaemonAction::Stop => sync::stop(&ctx),
+            DaemonAction::Status => sync::status(&ctx),
+            DaemonAction::Run => sync::run_daemon(&ctx).await,
+        },
     }
 }

@@ -1,21 +1,25 @@
 //! `skillpouch` on its own in an interactive terminal: the dashboard. The TUI
-//! draws; this side answers its requests (load the account, log in and out,
-//! open links) and sends back what happened.
+//! draws; this side answers its requests (load the account, set up and pick
+//! the pouch to sync, log in and out, open links) and sends back what
+//! happened.
 
 use super::{login, logout, status};
 use crate::browser;
 use crate::context::{Context, VERSION, signed_out};
 use crate::exit::{Exit, NOT_LOGGED_IN};
-use crate::when;
+use crate::usage::Reported;
+use crate::{daemon, names, setup, usage, when};
 use anyhow::Result;
 use sp_api::types::{ArtifactList, DeviceList, Me, PouchList};
-use sp_core::home::user_home;
+use sp_core::setup::SetupRecord;
 use sp_core::{Credentials, assistants};
-use sp_tui::{
-    Account, Assistant, Computer, Dashboard, Launch, LoginStep, Notice, Pouch, Request, Update,
-};
+use sp_crypto::vault::PouchMeta;
+use sp_tui::usage::Usage;
+use sp_tui::{Account, Computer, Dashboard, Launch, LoginStep, Notice, Pouch, Request, Update};
+use std::collections::BTreeMap;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 use time::OffsetDateTime;
@@ -37,7 +41,6 @@ pub async fn run(ctx: Context) -> Result<ExitCode> {
             .to_string_lossy()
             .trim()
             .to_string(),
-        assistants: local_assistants(),
     };
     let signed_in = matches!(ctx.credentials(), Ok(Some(_)));
     let (updates, updates_rx) = std::sync::mpsc::channel();
@@ -63,20 +66,6 @@ pub async fn run(ctx: Context) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn local_assistants() -> Vec<Assistant> {
-    let Some(home) = user_home() else {
-        return Vec::new();
-    };
-    assistants::scan(&home)
-        .into_iter()
-        .map(|assistant| Assistant {
-            name: assistant.name.into(),
-            folder: assistant.folder.into(),
-            installed: assistant.installed,
-        })
-        .collect()
-}
-
 /// Answers the TUI until it closes.
 async fn serve(
     ctx: Arc<Context>,
@@ -85,14 +74,21 @@ async fn serve(
 ) {
     let mut loading: Option<JoinHandle<()>> = None;
     let mut login_flow: Option<(JoinHandle<()>, oneshot::Sender<()>)> = None;
+    let reported = Arc::new(Reported::default());
+    // Setup is offered once per run; skipped, it waits for the Account tab.
+    let offered = Arc::new(AtomicBool::new(false));
+    let starting = Arc::clone(&ctx);
+    tokio::spawn(async move { keep_syncing(&starting).await });
+    let watcher = tokio::spawn(watch_sync(Arc::clone(&ctx), updates.clone()));
 
     while let Some(request) = requests.recv().await {
         match request {
             Request::Refresh => {
                 if loading.as_ref().is_none_or(JoinHandle::is_finished) {
                     let (ctx, updates) = (Arc::clone(&ctx), updates.clone());
+                    let (reported, offered) = (Arc::clone(&reported), Arc::clone(&offered));
                     loading = Some(tokio::spawn(async move {
-                        let _ = updates.send(load(&ctx).await);
+                        load_and_offer(&ctx, &reported, &offered, &updates).await;
                     }));
                 }
             }
@@ -101,13 +97,33 @@ async fn serve(
                     let _ = cancel.send(());
                 }
                 let (cancel, cancelled) = oneshot::channel();
-                let flow = tokio::spawn(log_in(Arc::clone(&ctx), updates.clone(), cancelled));
+                let flow = tokio::spawn(log_in(
+                    Arc::clone(&ctx),
+                    Arc::clone(&reported),
+                    Arc::clone(&offered),
+                    updates.clone(),
+                    cancelled,
+                ));
                 login_flow = Some((flow, cancel));
             }
             Request::CancelLogin => {
                 if let Some((_, cancel)) = login_flow.take() {
                     let _ = cancel.send(());
                 }
+            }
+            Request::Approve => {
+                let notice = match crate::approve::approve(&ctx, None) {
+                    Ok(approved) if crate::daemon::running(&ctx) => Notice::success(format!(
+                        "Approved {}. The background sync puts them in place.",
+                        approved.len()
+                    )),
+                    Ok(approved) => Notice::info(format!(
+                        "Approved {}. They're put in place on the next sync.",
+                        approved.len()
+                    )),
+                    Err(error) => Notice::error(error.to_string()),
+                };
+                let _ = updates.send(Update::Notice(notice));
             }
             Request::Logout => {
                 let credentials = Credentials::load(&ctx.home).ok().flatten();
@@ -130,6 +146,32 @@ async fn serve(
                 };
                 let _ = updates.send(Update::Notice(update));
             }
+            Request::UsePouch(id) => {
+                if let Err(error) = use_pouch(&ctx, &id).await {
+                    let _ = updates.send(Update::Notice(Notice::error(format!(
+                        "Couldn't switch pouches: {}",
+                        message(&error)
+                    ))));
+                }
+                // Either way the server has the last word.
+                let _ = updates.send(load(&ctx, &reported).await);
+            }
+            Request::Setup => {
+                let (ctx, updates) = (Arc::clone(&ctx), updates.clone());
+                tokio::spawn(async move {
+                    let _ = updates.send(Update::Setup(setup::assistants(&ctx).await));
+                });
+            }
+            Request::FinishSetup(choice) => {
+                let saved = setup::save(&ctx, choice).await;
+                let _ = updates.send(Update::SetupSaved(
+                    saved.as_ref().map(|_| ()).map_err(message),
+                ));
+                if saved.is_ok() {
+                    keep_syncing(&ctx).await;
+                    let _ = updates.send(load(&ctx, &reported).await);
+                }
+            }
             Request::Open(url) => {
                 if !browser::open(&url) {
                     let _ = updates.send(Update::Notice(Notice::error(format!(
@@ -139,6 +181,7 @@ async fn serve(
             }
         }
     }
+    watcher.abort();
     // The TUI closed: an open login is abandoned, not left waiting.
     if let Some((flow, cancel)) = login_flow {
         let _ = cancel.send(());
@@ -146,7 +189,13 @@ async fn serve(
     }
 }
 
-async fn log_in(ctx: Arc<Context>, updates: Sender<Update>, mut cancelled: oneshot::Receiver<()>) {
+async fn log_in(
+    ctx: Arc<Context>,
+    reported: Arc<Reported>,
+    offered: Arc<AtomicBool>,
+    updates: Sender<Update>,
+    mut cancelled: oneshot::Receiver<()>,
+) {
     let send = |step| {
         let _ = updates.send(Update::Login(step));
     };
@@ -173,7 +222,9 @@ async fn log_in(ctx: Arc<Context>, updates: Sender<Update>, mut cancelled: onesh
             match saved {
                 Ok(()) => {
                     send(LoginStep::Approved);
-                    let _ = updates.send(load(&ctx).await);
+                    // A new login is set up afresh.
+                    offered.store(false, Ordering::SeqCst);
+                    load_and_offer(&ctx, &reported, &offered, &updates).await;
                 }
                 Err(error) => send(LoginStep::Failed(message(&error))),
             }
@@ -185,13 +236,92 @@ async fn log_in(ctx: Arc<Context>, updates: Sender<Update>, mut cancelled: onesh
     }
 }
 
-async fn load(ctx: &Context) -> Update {
+/// Loads the dashboard, then offers setup if this login hasn't had it.
+async fn load_and_offer(
+    ctx: &Context,
+    reported: &Reported,
+    offered: &AtomicBool,
+    updates: &Sender<Update>,
+) {
+    let update = load(ctx, reported).await;
+    let loaded = matches!(update, Update::Loaded(_));
+    let _ = updates.send(update);
+    let Ok(Some(credentials)) = ctx.credentials() else {
+        return;
+    };
+    if loaded
+        && SetupRecord::needed(&ctx.home, &credentials.device_id)
+        && !offered.swap(true, Ordering::SeqCst)
+    {
+        let _ = updates.send(Update::Setup(setup::assistants(ctx).await));
+    }
+}
+
+async fn use_pouch(ctx: &Context, pouch_id: &str) -> Result<()> {
+    let mut session = ctx.session()?;
+    let token = session.access_token(ctx, false).await?;
+    ctx.client
+        .set_active_pouch(&session.key, &token, Some(pouch_id))
+        .await
+        .map_err(signed_out)?;
+    // The background sync notices and switches the links over.
+    crate::sync::switch_pouch(ctx, &session.credentials.device_id, pouch_id)
+}
+
+/// The sync line for this computer right now.
+fn sync_view(ctx: &Context) -> Option<sp_tui::SyncView> {
+    let device_id = ctx.credentials().ok().flatten()?.device_id;
+    let set_up = !SetupRecord::needed(&ctx.home, &device_id);
+    let status = sp_sync::status::SyncStatus::load(&ctx.home);
+    crate::sync::view(
+        status.as_ref(),
+        daemon::running(ctx),
+        set_up,
+        OffsetDateTime::now_utc(),
+    )
+}
+
+/// Starts the background sync once this computer is set up.
+async fn keep_syncing(ctx: &Arc<Context>) {
+    let ctx = Arc::clone(ctx);
+    let _ = tokio::task::spawn_blocking(move || {
+        let device_id = ctx.credentials().ok().flatten()?.device_id;
+        if SetupRecord::needed(&ctx.home, &device_id) {
+            return None;
+        }
+        daemon::start(&ctx).ok()
+    })
+    .await;
+}
+
+/// Sends the sync line whenever it changes, until the TUI closes.
+async fn watch_sync(ctx: Arc<Context>, updates: Sender<Update>) {
+    let mut shown = None;
+    loop {
+        let view = {
+            let ctx = Arc::clone(&ctx);
+            tokio::task::spawn_blocking(move || sync_view(&ctx))
+                .await
+                .ok()
+                .flatten()
+        };
+        if view != shown {
+            if updates.send(Update::Sync(view.clone())).is_err() {
+                return;
+            }
+            shown = view;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn load(ctx: &Context, reported: &Reported) -> Update {
     match ctx.credentials() {
         Ok(Some(_)) => {}
         Ok(None) => return Update::SignedOut,
         Err(error) => return Update::Failed(message(&error)),
     }
-    match fetch(ctx).await {
+    match fetch(ctx, reported).await {
         Ok(dashboard) => Update::Loaded(Box::new(dashboard)),
         // Removed or expired: this computer has to log in again.
         Err(error)
@@ -205,17 +335,30 @@ async fn load(ctx: &Context) -> Update {
     }
 }
 
-async fn fetch(ctx: &Context) -> Result<Dashboard> {
+async fn fetch(ctx: &Context, reported: &Reported) -> Result<Dashboard> {
     let mut session = ctx.session()?;
     // Refreshes the access token first when it needs it.
     let me = status::fetch_me(ctx, &mut session).await?;
     let token = session.credentials.access_token.as_str();
     let key = &session.key;
-    let (pouches, devices) = tokio::try_join!(
-        ctx.client.pouches(key, token),
-        ctx.client.devices(key, token),
-    )
-    .map_err(signed_out)?;
+    // Names and usage are extras: without them the dashboard still shows.
+    let (listed, names, usage) = tokio::join!(
+        async {
+            tokio::try_join!(
+                ctx.client.pouches(key, token),
+                ctx.client.devices(key, token),
+            )
+        },
+        names::pouch_names(ctx, &session),
+        usage::sync(ctx, &session, reported),
+    );
+    let (pouches, devices) = listed.map_err(signed_out)?;
+    let active = devices
+        .devices
+        .iter()
+        .find(|device| device.is_current)
+        .and_then(|device| device.active_pouch_id.as_deref());
+    let first_sync = setup::pending(ctx, &session.credentials.device_id, active);
     let mut contents = Vec::new();
     for pouch in pouches.pouches.iter().filter(|p| p.state != "deleted") {
         let items = ctx
@@ -225,22 +368,48 @@ async fn fetch(ctx: &Context) -> Result<Dashboard> {
             .map_err(signed_out)?;
         contents.push((pouch.id.clone(), items));
     }
-    Ok(dashboard(
-        me,
-        pouches,
-        devices,
-        &contents,
+    let mut dashboard = dashboard(
+        Answers {
+            me,
+            pouches,
+            devices,
+            contents,
+            names,
+            usage,
+            first_sync,
+        },
         OffsetDateTime::now_utc(),
-    ))
+    );
+    dashboard.sync = sync_view(ctx);
+    Ok(dashboard)
 }
 
-fn dashboard(
+/// What the server said, and what this computer could decrypt.
+struct Answers {
     me: Me,
     pouches: PouchList,
     devices: DeviceList,
-    contents: &[(String, ArtifactList)],
-    now: OffsetDateTime,
-) -> Dashboard {
+    contents: Vec<(String, ArtifactList)>,
+    names: Result<BTreeMap<String, PouchMeta>, names::Missing>,
+    usage: Result<Usage, String>,
+    /// The first sync chosen at setup, while it hasn't run.
+    first_sync: Option<String>,
+}
+
+fn dashboard(answers: Answers, now: OffsetDateTime) -> Dashboard {
+    let Answers {
+        me,
+        pouches,
+        devices,
+        contents,
+        names,
+        usage,
+        first_sync,
+    } = answers;
+    let (names, names_missing) = match names {
+        Ok(names) => (names, None),
+        Err(missing) => (BTreeMap::new(), Some(missing)),
+    };
     let mut listed = pouches.pouches;
     listed.sort_by_key(|pouch| pouch.created_seq);
     let pouches = listed
@@ -252,8 +421,13 @@ fn dashboard(
                 .find(|(id, _)| id == &pouch.id)
                 .map_or(&[][..], |(_, list)| list.items.as_slice());
             let updated = items.iter().map(|a| a.updated_at.as_str()).max();
+            let meta = names.get(&pouch.id);
             Pouch {
                 number: index + 1,
+                name: meta.map(|meta| meta.name.clone()),
+                description: meta
+                    .map(|meta| meta.description.clone())
+                    .filter(|d| !d.is_empty()),
                 state: pouch.state,
                 items: items.len(),
                 more: items.len() >= ITEMS_COUNTED as usize,
@@ -313,6 +487,10 @@ fn dashboard(
             .iter()
             .filter(|browser| browser.revoked_at.is_none())
             .count(),
+        names_missing,
+        usage,
+        first_sync,
+        sync: None,
     }
 }
 
@@ -391,13 +569,35 @@ mod tests {
               "updated_at": "2026-10-09T08:00:00Z" }
         ]}));
 
-        let dashboard = dashboard(me, pouches, devices, &[("p2".into(), items)], now);
+        let names = BTreeMap::from([(
+            "p2".to_string(),
+            PouchMeta {
+                name: "Work stuff".into(),
+                description: String::new(),
+            },
+        )]);
+        let dashboard = dashboard(
+            Answers {
+                me,
+                pouches,
+                devices,
+                contents: vec![("p2".into(), items)],
+                names: Ok(names),
+                usage: Err("offline".into()),
+                first_sync: Some("Merge with Claude Code".into()),
+            },
+            now,
+        );
         let numbers: Vec<_> = dashboard
             .pouches
             .iter()
             .map(|p| (p.id.as_str(), p.number, p.items))
             .collect();
         assert_eq!(numbers, [("p1", 1, 0), ("p2", 2, 2)]);
+        let labels: Vec<_> = dashboard.pouches.iter().map(Pouch::label).collect();
+        assert_eq!(labels, ["Pouch 1", "Work stuff"]);
+        assert_eq!(dashboard.pouches[1].description, None);
+        assert_eq!(dashboard.names_missing, None);
         assert_eq!(dashboard.pouches[1].updated.as_deref(), Some("3 h ago"));
         assert_eq!(dashboard.computers.len(), 1);
         let laptop = &dashboard.computers[0];
@@ -407,5 +607,9 @@ mod tests {
         assert_eq!(laptop.connected.as_deref(), Some("Oct 8"));
         assert_eq!(dashboard.browsers, 1);
         assert_eq!(dashboard.account.plan, "Free");
+        assert_eq!(
+            dashboard.first_sync.as_deref(),
+            Some("Merge with Claude Code")
+        );
     }
 }

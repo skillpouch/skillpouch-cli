@@ -41,11 +41,41 @@ impl Home {
         self.state_dir().join("credentials.json")
     }
 
+    /// Held while refreshing tokens: the refresh token is single-use, so two
+    /// processes must never spend it at once.
+    pub fn credentials_lock(&self) -> PathBuf {
+        self.root.join("run/credentials.lock")
+    }
+
+    pub fn run_dir(&self) -> PathBuf {
+        self.root.join("run")
+    }
+
+    pub fn logs_dir(&self) -> PathBuf {
+        self.root.join("logs")
+    }
+
     /// Creates `dir` (and parents) readable only by this user.
     pub fn ensure_private_dir(&self, dir: &Path) -> Result<()> {
         fs::create_dir_all(dir).map_err(|source| io(dir, source))?;
         restrict(dir, 0o700)
     }
+}
+
+/// An exclusive lock on `path`, held until the returned file is dropped.
+/// Blocks while another process holds it.
+pub fn lock_exclusive(path: &Path) -> Result<fs::File> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| io(parent, source))?;
+    }
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(|source| io(path, source))?;
+    file.lock().map_err(|source| io(path, source))?;
+    Ok(file)
 }
 
 /// The user's home folder (where assistants keep their settings).

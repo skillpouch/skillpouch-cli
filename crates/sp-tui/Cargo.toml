@@ -11,3 +11,8 @@ workspace = true
 
 [dependencies]
 ratatui = "0.30.2"
+sp-harness = { path = "../sp-harness" }
+time = "0.3.55"
+
+[dev-dependencies]
+time = { version = "0.3.55", features = ["macros"] }

@@ -19,8 +19,12 @@ serde_json = "1.0.151"
 sp-api = { version = "0.1.0", path = "../sp-api" }
 sp-core = { version = "0.1.0", path = "../sp-core" }
 sp-crypto = { version = "0.1.0", path = "../sp-crypto" }
+sp-harness = { version = "0.1.0", path = "../sp-harness" }
+sp-sync = { version = "0.1.0", path = "../sp-sync" }
 sp-tui = { version = "0.1.0", path = "../sp-tui" }
-time = { version = "0.3.55", features = ["parsing"] }
+sp-usage = { version = "0.1.0", path = "../sp-usage" }
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["formatting", "macros", "parsing"] }
 tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]

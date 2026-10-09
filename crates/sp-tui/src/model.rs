@@ -1,6 +1,8 @@
 //! What the TUI shows and what it asks for. The CLI talks to the server and
 //! sends [`Update`]s; the TUI answers keys with [`Request`]s.
 
+use crate::usage::Usage;
+
 /// Known before anything is fetched.
 #[derive(Debug, Clone)]
 pub struct Launch {
@@ -8,15 +10,6 @@ pub struct Launch {
     pub server: String,
     /// This computer's hostname, the default name when it logs in.
     pub hostname: String,
-    pub assistants: Vec<Assistant>,
-}
-
-/// An AI assistant on this computer, found by its config folder.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Assistant {
-    pub name: String,
-    pub folder: String,
-    pub installed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,12 +23,14 @@ pub struct Account {
     pub delete_after: Option<String>,
 }
 
-/// A pouch as the server sees it. Its name and items are end-to-end
-/// encrypted, so it is shown by number until this computer can decrypt.
+/// A pouch. Its name is end-to-end encrypted: without it the pouch shows by
+/// number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pouch {
     pub id: String,
     pub number: usize,
+    pub name: Option<String>,
+    pub description: Option<String>,
     pub state: String,
     pub items: usize,
     /// More items than were counted.
@@ -64,12 +59,63 @@ pub struct Computer {
     pub cursors: Vec<(String, u64)>,
 }
 
+impl Pouch {
+    pub fn label(&self) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| format!("Pouch {}", self.number))
+    }
+
+    /// Only an active pouch can be synced; locked and archived ones can't.
+    pub fn usable(&self) -> bool {
+        self.state == "active"
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dashboard {
     pub account: Account,
     pub pouches: Vec<Pouch>,
     pub computers: Vec<Computer>,
     pub browsers: usize,
+    /// Why the pouch names couldn't be read, when they couldn't.
+    pub names_missing: Option<String>,
+    /// Token usage of every computer; `Err` says why it isn't there.
+    pub usage: Result<Usage, String>,
+    /// The first sync chosen at setup, while it hasn't run: `Merge with OpenCode`.
+    pub first_sync: Option<String>,
+    /// How syncing this computer is going; `None` before it is set up.
+    pub sync: Option<SyncView>,
+}
+
+/// One line about syncing, and maybe a second that explains it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncView {
+    pub tone: SyncTone,
+    /// `Synced 2 min ago`, `Syncing…`, `Offline`.
+    pub text: String,
+    pub detail: Option<String>,
+    /// Hooks and plugins from elsewhere that wait for approval here.
+    pub waiting: Vec<WaitingView>,
+}
+
+/// Something that would run commands here, waiting for approval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitingView {
+    /// `Hook format`.
+    pub label: String,
+    /// What it runs.
+    pub detail: String,
+    /// An older version, approved before, runs meanwhile.
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncTone {
+    Good,
+    Busy,
+    Warn,
+    Bad,
 }
 
 impl Dashboard {
@@ -77,8 +123,14 @@ impl Dashboard {
         self.computers.iter().find(|computer| computer.current)
     }
 
-    pub fn items(&self) -> usize {
-        self.pouches.iter().map(|pouch| pouch.items).sum()
+    /// The one pouch this computer syncs.
+    pub fn active_pouch(&self) -> Option<&Pouch> {
+        let id = self.this_computer()?.active_pouch.as_ref()?;
+        self.pouches.iter().find(|pouch| &pouch.id == id)
+    }
+
+    pub fn pouch(&self, id: &str) -> Option<&Pouch> {
+        self.pouches.iter().find(|pouch| pouch.id == id)
     }
 
     pub fn live_pouches(&self) -> usize {
@@ -96,8 +148,36 @@ pub enum Request {
     Login,
     CancelLogin,
     Logout,
+    /// Make this pouch the one this computer syncs.
+    UsePouch(String),
     /// Open a web app path (`/app/account`) in the browser.
     Open(String),
+    /// Look at this computer's assistants and set it up.
+    Setup,
+    FinishSetup(SetupChoice),
+    /// Let the waiting hooks and plugins run on this computer.
+    Approve,
+}
+
+/// The pouch a computer syncs and how its first sync starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupChoice {
+    pub pouch_id: String,
+    pub first_sync: FirstSync,
+}
+
+/// How the first sync treats what's in the pouch and on this computer.
+/// Assistants are given by id (`claude-code`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FirstSync {
+    /// The pouch is empty: fill it from this assistant, or start empty.
+    Fill(Option<String>),
+    /// This computer takes the pouch as it is.
+    UsePouch,
+    /// Both: the pouch's items and this assistant's.
+    Merge(String),
+    /// The pouch becomes what this assistant has.
+    UseComputer(String),
 }
 
 /// The CLI tells the TUI what happened.
@@ -109,6 +189,12 @@ pub enum Update {
     Failed(String),
     Login(LoginStep),
     Notice(Notice),
+    /// This computer isn't set up: what its assistants hold.
+    Setup(Vec<sp_harness::Harness>),
+    /// Setup was saved (`Ok`), or why it wasn't.
+    SetupSaved(Result<(), String>),
+    /// The sync status changed.
+    Sync(Option<SyncView>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

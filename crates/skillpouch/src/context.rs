@@ -62,6 +62,21 @@ impl Session {
         if !force_refresh && self.credentials.access_fresh(unix_now(), REFRESH_MARGIN) {
             return Ok(self.credentials.access_token.clone());
         }
+        let lock_path = ctx.home.credentials_lock();
+        let _lock = tokio::task::spawn_blocking(move || sp_core::home::lock_exclusive(&lock_path))
+            .await
+            .context("couldn't lock the credentials")??;
+        // Another process (the background sync, the TUI) may have refreshed
+        // while we waited: its tokens are the only valid ones now.
+        if let Some(saved) = ctx.credentials()?
+            && saved.device_id == self.credentials.device_id
+            && saved.refresh_token != self.credentials.refresh_token
+        {
+            self.credentials = saved;
+            if self.credentials.access_fresh(unix_now(), REFRESH_MARGIN) {
+                return Ok(self.credentials.access_token.clone());
+            }
+        }
         let tokens = ctx
             .client
             .refresh(&self.key, &self.credentials.refresh_token)

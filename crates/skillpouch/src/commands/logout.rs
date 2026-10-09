@@ -24,6 +24,8 @@ pub async fn run(ctx: &Context) -> Result<ExitCode> {
 pub async fn forget(ctx: &Context, credentials: Credentials) -> Result<()> {
     let revoked = revoke(ctx, credentials.clone()).await;
     Credentials::remove(&ctx.home)?;
+    // Nothing to sync without a login; the links keep working as they are.
+    let _ = crate::daemon::stop(ctx);
     if !revoked {
         ui::warn(format!(
             "Couldn't reach the server. Remove this computer on your Devices page: {}",

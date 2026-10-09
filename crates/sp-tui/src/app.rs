@@ -1,9 +1,10 @@
 //! The TUI's state and what each key does. Drawing is in `view`.
 //!
-//! Two screens: the login screen while this computer isn't connected (or is
-//! logging in again), and the dashboard once it is.
+//! Three screens: the login screen while this computer isn't connected (or
+//! is logging in again), setup right after it connects, and the dashboard.
 
 use crate::model::{Dashboard, Launch, LoginStep, Notice, Request, Update};
+use crate::setup::{self, Setup};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::time::{Duration, Instant};
 
@@ -14,8 +15,8 @@ const NOTICE_FOR: Duration = Duration::from_secs(5);
 pub enum Tab {
     Overview,
     Pouches,
+    Usage,
     Computers,
-    Assistants,
     Account,
 }
 
@@ -23,8 +24,8 @@ impl Tab {
     pub const ALL: [Tab; 5] = [
         Self::Overview,
         Self::Pouches,
+        Self::Usage,
         Self::Computers,
-        Self::Assistants,
         Self::Account,
     ];
 
@@ -32,8 +33,8 @@ impl Tab {
         match self {
             Self::Overview => "Overview",
             Self::Pouches => "Pouches",
+            Self::Usage => "Usage",
             Self::Computers => "Computers",
-            Self::Assistants => "Assistants",
             Self::Account => "Account",
         }
     }
@@ -62,6 +63,7 @@ pub struct Login {
 /// The actions on the Account tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountAction {
+    SetUp,
     OpenAccount,
     OpenBilling,
     Relogin,
@@ -69,7 +71,8 @@ pub enum AccountAction {
 }
 
 impl AccountAction {
-    pub const ALL: [AccountAction; 4] = [
+    pub const ALL: [AccountAction; 5] = [
+        Self::SetUp,
         Self::OpenAccount,
         Self::OpenBilling,
         Self::Relogin,
@@ -78,6 +81,7 @@ impl AccountAction {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::SetUp => "Set up this computer again",
             Self::OpenAccount => "Open your account",
             Self::OpenBilling => "Manage plan and billing",
             Self::Relogin => "Log in again with new keys",
@@ -87,6 +91,7 @@ impl AccountAction {
 
     pub fn detail(self) -> &'static str {
         match self {
+            Self::SetUp => "Pick the pouch it syncs and how the first sync starts",
             Self::OpenAccount => "Profile, sign-in and security, in the browser",
             Self::OpenBilling => "Change or cancel your plan, in the browser",
             Self::Relogin => "Replaces this computer's keys once you approve",
@@ -111,8 +116,12 @@ pub struct App {
     cursors: [usize; 5],
     /// The login screen is up.
     pub login: Option<Login>,
+    /// Setting up what this computer syncs.
+    pub setup: Option<Setup>,
     /// Asking before logging out.
     pub confirm_logout: bool,
+    /// Showing the hooks and plugins that wait for approval.
+    pub reviewing: bool,
     notice: Option<(Notice, Instant)>,
     pub tick: usize,
 }
@@ -130,7 +139,9 @@ impl App {
             tab: Tab::Overview,
             cursors: [0; 5],
             login: (!signed_in).then(Login::idle),
+            setup: None,
             confirm_logout: false,
+            reviewing: false,
             notice: None,
             tick: 0,
         }
@@ -168,10 +179,9 @@ impl App {
 
     fn rows(&self, tab: Tab) -> usize {
         match tab {
-            Tab::Overview => 0,
+            Tab::Overview | Tab::Usage => 0,
             Tab::Pouches => self.dashboard().map_or(0, |d| d.pouches.len()),
             Tab::Computers => self.dashboard().map_or(0, |d| d.computers.len()),
-            Tab::Assistants => self.launch.assistants.len(),
             Tab::Account => AccountAction::ALL.len(),
         }
     }
@@ -203,8 +213,44 @@ impl App {
                     self.status = Status::Failed(message);
                 }
             }
+            Update::Sync(sync) => {
+                if let Status::Ready(dashboard) = &mut self.status {
+                    dashboard.sync = sync;
+                }
+                if self.waiting().is_empty() {
+                    self.reviewing = false;
+                }
+            }
             Update::Login(step) => self.login_step(step),
             Update::Notice(notice) => self.show(notice),
+            Update::Setup(assistants) => {
+                if self.setup.is_none()
+                    && let Some(dashboard) = self.dashboard()
+                {
+                    self.setup = Some(Setup::new(assistants, dashboard));
+                }
+            }
+            Update::SetupSaved(Ok(())) => {
+                let label =
+                    self.setup
+                        .take()
+                        .zip(self.dashboard())
+                        .and_then(|(setup, dashboard)| {
+                            setup.chosen_pouch(dashboard).map(|p| p.label())
+                        });
+                self.tab = Tab::Overview;
+                if let Some(label) = label {
+                    self.show(Notice::success(format!(
+                        "Set up. This computer syncs {label}."
+                    )));
+                }
+            }
+            Update::SetupSaved(Err(message)) => {
+                if let Some(setup) = &mut self.setup {
+                    setup.saving = false;
+                    setup.error = Some(message);
+                }
+            }
         }
         self.clamp_cursors();
     }
@@ -248,7 +294,8 @@ impl App {
     /// Where `o` goes from the current tab.
     fn web_path(&self) -> String {
         match self.tab {
-            Tab::Overview | Tab::Assistants => "/app".into(),
+            Tab::Overview => "/app".into(),
+            Tab::Usage => "/app/account/usage".into(),
             Tab::Pouches => self
                 .dashboard()
                 .and_then(|d| d.pouches.get(self.cursor(Tab::Pouches)))
@@ -268,8 +315,14 @@ impl App {
         if let Some(login) = self.login.clone() {
             return self.on_login_key(key.code, login.step.as_ref());
         }
+        if self.setup.is_some() {
+            return self.on_setup_key(key.code);
+        }
         if self.confirm_logout {
             return self.on_logout_key(key.code);
+        }
+        if self.reviewing {
+            return self.on_review_key(key.code);
         }
         self.on_dashboard_key(key.code)
     }
@@ -300,11 +353,51 @@ impl App {
         }
     }
 
+    fn on_setup_key(&mut self, code: KeyCode) -> Outcome {
+        let (Some(setup), Status::Ready(dashboard)) = (&mut self.setup, &self.status) else {
+            self.setup = None;
+            return Outcome::Nothing;
+        };
+        if code == KeyCode::Char('q') && !setup.saving {
+            return Outcome::Quit;
+        }
+        match setup.on_key(code, dashboard) {
+            setup::Outcome::Stay => Outcome::Nothing,
+            setup::Outcome::Send(request) => Outcome::Send(request),
+            setup::Outcome::Close => {
+                self.setup = None;
+                self.show(Notice::info(
+                    "Skipped. Set this computer up any time from the Account tab.",
+                ));
+                Outcome::Nothing
+            }
+        }
+    }
+
     fn on_logout_key(&mut self, code: KeyCode) -> Outcome {
         self.confirm_logout = false;
         match code {
             KeyCode::Char('y') | KeyCode::Enter => Outcome::Send(Request::Logout),
             _ => Outcome::Nothing,
+        }
+    }
+
+    fn on_review_key(&mut self, code: KeyCode) -> Outcome {
+        self.reviewing = false;
+        match code {
+            KeyCode::Char('y') | KeyCode::Enter => Outcome::Send(Request::Approve),
+            _ => Outcome::Nothing,
+        }
+    }
+
+    /// Hooks and plugins that wait for approval on this computer.
+    pub fn waiting(&self) -> &[crate::model::WaitingView] {
+        match &self.status {
+            Status::Ready(dashboard) => dashboard
+                .sync
+                .as_ref()
+                .map_or(&[], |sync| sync.waiting.as_slice()),
+            _ => &[],
         }
     }
 
@@ -344,8 +437,14 @@ impl App {
                 Outcome::Send(Request::Refresh)
             }
             KeyCode::Char('o') => self.open(&self.web_path()),
+            KeyCode::Char('a') if !self.waiting().is_empty() => {
+                self.reviewing = true;
+                Outcome::Nothing
+            }
+            KeyCode::Enter if self.tab == Tab::Pouches => self.use_selected_pouch(),
             KeyCode::Enter if self.tab == Tab::Account => {
                 match AccountAction::ALL.get(self.cursor(Tab::Account)) {
+                    Some(AccountAction::SetUp) => Outcome::Send(Request::Setup),
                     Some(AccountAction::OpenAccount) => self.open("/app/account"),
                     Some(AccountAction::OpenBilling) => self.open("/app/account/billing"),
                     Some(AccountAction::Relogin) => {
@@ -364,6 +463,37 @@ impl App {
     }
 }
 
+impl App {
+    /// Makes the selected pouch the one this computer syncs. The dashboard
+    /// shows it right away; the next load confirms it.
+    fn use_selected_pouch(&mut self) -> Outcome {
+        let cursor = self.cursor(Tab::Pouches);
+        let Status::Ready(dashboard) = &mut self.status else {
+            return Outcome::Nothing;
+        };
+        let Some(pouch) = dashboard.pouches.get(cursor) else {
+            return Outcome::Nothing;
+        };
+        let (id, label) = (pouch.id.clone(), pouch.label());
+        if !pouch.usable() {
+            let state = pouch.state.clone();
+            self.show(Notice::error(format!(
+                "{label} is {state}, so it can't sync. Manage it in the web app."
+            )));
+            return Outcome::Nothing;
+        }
+        let Some(this) = dashboard.computers.iter_mut().find(|c| c.current) else {
+            return Outcome::Nothing;
+        };
+        if this.active_pouch.as_deref() == Some(id.as_str()) {
+            return Outcome::Nothing;
+        }
+        this.active_pouch = Some(id.clone());
+        self.show(Notice::info(format!("This computer now syncs {label}.")));
+        Outcome::Send(Request::UsePouch(id))
+    }
+}
+
 impl Login {
     fn idle() -> Self {
         Self {
@@ -376,25 +506,13 @@ impl Login {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::model::{Account, Assistant, Computer, Pouch};
+    use crate::model::{Account, Computer, Pouch};
 
     pub fn launch() -> Launch {
         Launch {
             version: "v0.1.0".into(),
             server: "https://skillpouch.net".into(),
             hostname: "laptop".into(),
-            assistants: vec![
-                Assistant {
-                    name: "Claude Code".into(),
-                    folder: ".claude".into(),
-                    installed: true,
-                },
-                Assistant {
-                    name: "Codex".into(),
-                    folder: ".codex".into(),
-                    installed: false,
-                },
-            ],
         }
     }
 
@@ -413,6 +531,8 @@ pub(crate) mod tests {
                 Pouch {
                     id: "0193ab12-0000-7000-8000-000000000001".into(),
                     number: 1,
+                    name: Some("Work stuff".into()),
+                    description: Some("Skills for the day job".into()),
                     state: "active".into(),
                     items: 12,
                     more: false,
@@ -422,6 +542,8 @@ pub(crate) mod tests {
                 Pouch {
                     id: "0193ab12-0000-7000-8000-000000000002".into(),
                     number: 2,
+                    name: None,
+                    description: None,
                     state: "locked".into(),
                     items: 2,
                     more: false,
@@ -458,6 +580,10 @@ pub(crate) mod tests {
                 },
             ],
             browsers: 1,
+            names_missing: None,
+            usage: Ok(crate::usage::tests::usage()),
+            first_sync: None,
+            sync: None,
         }
     }
 
@@ -475,9 +601,9 @@ pub(crate) mod tests {
     fn numbers_tab_and_arrows_switch_tabs() {
         let mut app = ready();
         press(&mut app, KeyCode::Char('3'));
-        assert_eq!(app.tab, Tab::Computers);
+        assert_eq!(app.tab, Tab::Usage);
         press(&mut app, KeyCode::Tab);
-        assert_eq!(app.tab, Tab::Assistants);
+        assert_eq!(app.tab, Tab::Computers);
         for _ in 0..4 {
             press(&mut app, KeyCode::Left);
         }
@@ -496,6 +622,46 @@ pub(crate) mod tests {
                 "https://skillpouch.net/app/p/0193ab12-0000-7000-8000-000000000002".into()
             ))
         );
+    }
+
+    #[test]
+    fn enter_picks_the_pouch_this_computer_syncs() {
+        let mut app = ready();
+        press(&mut app, KeyCode::Char('2'));
+        // Already the active one: nothing to do.
+        assert_eq!(press(&mut app, KeyCode::Enter), Outcome::Nothing);
+
+        let mut second = dashboard();
+        second.pouches[1].state = "active".into();
+        app.apply(Update::Loaded(Box::new(second)));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Outcome::Send(Request::UsePouch(
+                "0193ab12-0000-7000-8000-000000000002".into()
+            ))
+        );
+        let active = app.dashboard().and_then(Dashboard::active_pouch);
+        assert_eq!(active.map(|p| p.number), Some(2));
+        assert_eq!(
+            app.notice().map(|n| n.text.as_str()),
+            Some("This computer now syncs Pouch 2.")
+        );
+    }
+
+    #[test]
+    fn a_locked_pouch_cant_be_picked() {
+        let mut app = ready();
+        press(&mut app, KeyCode::Char('2'));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(press(&mut app, KeyCode::Enter), Outcome::Nothing);
+        assert_eq!(
+            app.dashboard()
+                .and_then(Dashboard::active_pouch)
+                .map(|p| p.number),
+            Some(1)
+        );
+        assert!(app.notice().is_some_and(|n| n.text.contains("locked")));
     }
 
     #[test]
@@ -551,8 +717,9 @@ pub(crate) mod tests {
     fn logging_in_again_can_be_left_for_the_dashboard() {
         let mut app = ready();
         press(&mut app, KeyCode::Char('5'));
-        press(&mut app, KeyCode::Down);
-        press(&mut app, KeyCode::Down);
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Down);
+        }
         press(&mut app, KeyCode::Enter);
         assert!(app.login.is_some());
         press(&mut app, KeyCode::Esc);
@@ -574,6 +741,49 @@ pub(crate) mod tests {
         );
         app.apply(Update::SignedOut);
         assert!(app.login.is_some());
+    }
+
+    #[test]
+    fn setup_opens_once_takes_the_keys_and_closes_when_saved() {
+        let mut app = ready();
+        app.apply(Update::Setup(crate::setup::tests::assistants()));
+        assert!(app.setup.is_some());
+        // A second offer (a refresh) doesn't restart it.
+        press(&mut app, KeyCode::Enter);
+        app.apply(Update::Setup(Vec::new()));
+        assert_eq!(app.setup.as_ref().map(|s| s.assistants.len()), Some(2));
+        // Dashboard keys don't reach the tabs.
+        press(&mut app, KeyCode::Char('3'));
+        assert_eq!(app.tab, Tab::Overview);
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            press(&mut app, KeyCode::Enter),
+            Outcome::Send(Request::FinishSetup(_))
+        ));
+        app.apply(Update::SetupSaved(Err("Server unreachable.".into())));
+        let failed = app.setup.as_ref().map(|s| (s.saving, s.error.clone()));
+        assert_eq!(failed, Some((false, Some("Server unreachable.".into()))));
+        press(&mut app, KeyCode::Enter);
+        app.apply(Update::SetupSaved(Ok(())));
+        assert!(app.setup.is_none());
+        assert_eq!(
+            app.notice().map(|n| n.text.as_str()),
+            Some("Set up. This computer syncs Work stuff.")
+        );
+    }
+
+    #[test]
+    fn setup_can_be_skipped_and_reopened_from_the_account_tab() {
+        let mut app = ready();
+        app.apply(Update::Setup(Vec::new()));
+        press(&mut app, KeyCode::Esc);
+        assert!(app.setup.is_none());
+        assert!(app.notice().is_some_and(|n| n.text.starts_with("Skipped")));
+        press(&mut app, KeyCode::Char('5'));
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Outcome::Send(Request::Setup)
+        );
     }
 
     #[test]

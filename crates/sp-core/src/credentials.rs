@@ -25,6 +25,10 @@ pub struct Credentials {
     pub access_expires_at: u64,
     /// The HPKE-sealed welcome from the approving browser.
     pub welcome: String,
+    /// This computer's member in the account roster; the welcome is bound
+    /// to it. Logins from before it was saved have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_id: Option<String>,
 }
 
 impl Credentials {
@@ -98,6 +102,7 @@ mod tests {
             access_token: "ACCESS-SECRET".into(),
             access_expires_at: 1_000,
             welcome: "w".into(),
+            member_id: Some("m".into()),
         }
     }
 

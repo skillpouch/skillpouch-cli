@@ -1,13 +1,13 @@
 //! `skillpouch login`: create device keys, open a login request, let the user
 //! approve it in a signed-in, unlocked browser, then redeem it for tokens.
 
-use super::logout;
+use super::{logout, status};
 use crate::browser;
 use crate::context::{Context, VERSION, unix_now};
 use crate::exit::{CANCELLED, Exit};
-use crate::ui::{self, Card, Spinner};
+use crate::ui::{self, Ending, LiveBanner};
 use anyhow::Result;
-use sp_api::types::{CliAuthCreate, CliAuthToken, DeviceTokens};
+use sp_api::types::{CliAuthCreate, CliAuthToken, DeviceTokens, Me};
 use sp_core::home::user_home;
 use sp_core::{Credentials, assistants};
 use sp_crypto::confirm::confirm_code;
@@ -36,73 +36,99 @@ pub async fn run(
         ));
     }
 
-    ui::banner(&format!("v{VERSION}"));
+    let via_token = token.is_some();
+    let banner = LiveBanner::start(&format!("v{VERSION}"), "Creating this computer's keys…");
     // Logging in again replaces the current login, but only once the new one
     // is approved: a cancelled or denied login leaves this computer as it was.
     let replacing = Credentials::load(&ctx.home).ok().flatten();
     if let Some(existing) = &replacing {
-        ui::hint(format!(
-            "Already logged in to {}. Approving this login replaces it with new keys.",
-            existing.api_url
-        ));
-        println!();
+        banner.note(
+            ui::dim(format!(
+                "Replaces the login to {} once approved.",
+                existing.api_url
+            ))
+            .to_string(),
+        );
     }
-    let via_token = token.is_some();
-    let spinner = Spinner::start("Creating this computer's keys…");
-    let pending = begin(ctx, token, name).await;
-    spinner.clear();
-    let pending = pending?;
+    let pending = match begin(ctx, token, name).await {
+        Ok(pending) => pending,
+        Err(error) => {
+            banner.finish(Ending::Sad);
+            return Err(error);
+        }
+    };
 
-    println!(
-        "{} {}\n",
-        ui::heading("Connecting"),
-        ui::accent(&pending.device_name)
-    );
+    let mut details = Vec::new();
     if via_token {
-        step(1, "Approve it in the browser where you copied the command");
+        // The browser that made the command approves it on its own.
+        banner.status(format!("Connecting {}…", ui::accent(&pending.device_name)));
     } else {
-        step(1, "Approve this computer in your browser");
-        println!("     {}", ui::accent(&pending.authorize_url));
-        if !no_browser && browser::open(&pending.authorize_url) {
-            println!("     {}", ui::dim("Opened it for you."));
-        }
+        banner.status(format!(
+            "Waiting for you to approve {} {}",
+            ui::accent(&pending.device_name),
+            ui::dim("· Ctrl+C to cancel")
+        ));
+        let opened = !no_browser && browser::open(&pending.authorize_url);
+        details.push(format!(
+            "{} {}",
+            ui::dim(if opened { "Opened" } else { "Open" }),
+            ui::accent(&pending.authorize_url)
+        ));
+        details.push(format!(
+            "{} {}",
+            ui::dim("Check that it shows"),
+            ui::accent(pending.code.replace('-', " · ")).bold()
+        ));
     }
-    println!();
-    step(2, "Check that the browser shows this code");
-    ui::code_box(&pending.code);
-    println!();
+    banner.details(details);
 
-    let spinner = Spinner::with_elapsed(format!(
-        "Waiting for approval {}",
-        ui::dim("· Ctrl+C to cancel")
-    ));
     let approved = tokio::select! {
-        result = pending.wait(ctx) => {
-            spinner.clear();
-            result?
-        }
+        result = pending.wait(ctx) => result,
         _ = tokio::signal::ctrl_c() => {
-            spinner.clear();
+            banner.finish(Ending::Sad);
             pending.cancel(ctx).await;
             return Err(Exit::with_code(CANCELLED, "Login cancelled.", Some("Nothing was saved. Run `skillpouch login` to try again.")));
         }
     };
-    pending.save(ctx, approved).await?;
+    let saved = match approved {
+        Ok(approved) => {
+            banner.status("Saving the keys…");
+            pending.save(ctx, approved).await
+        }
+        Err(error) => Err(error),
+    };
+    if let Err(error) = saved {
+        banner.finish(Ending::Sad);
+        return Err(error);
+    }
+    banner.status("Loading your account…");
+    let me = account(ctx).await;
+    banner.finish(Ending::Happy);
 
-    ui::success(if replacing.is_some() {
-        "Logged in with new keys"
-    } else {
-        "Logged in"
-    });
+    match me {
+        Some(me) => {
+            ui::success(format!(
+                "Logged in as {} {}",
+                ui::heading(&me.user.name),
+                ui::dim(format!("· {}", me.user.email))
+            ));
+            println!(
+                "   {} {}",
+                ui::accent(&me.account.entitlements.plan_name),
+                ui::dim(format!("plan · this computer is {}", pending.device_name))
+            );
+        }
+        None => ui::success(format!("Logged in as {}", pending.device_name)),
+    }
     println!();
-    let card = Card::new("This computer")
-        .row("Name", pending.device_name.as_str())
-        .row("Server", ctx.client.base())
-        .row("Keys", ui::dim(ctx.home.root().display()).to_string());
-    println!("{}", card.render(ui::width()));
-    println!();
-    ui::hint("Run `skillpouch status` to see your account.");
+    ui::hint("Run `skillpouch` to choose what this computer syncs.");
     Ok(ExitCode::SUCCESS)
+}
+
+/// The account, for the summary; the login already worked if this fails.
+async fn account(ctx: &Context) -> Option<Me> {
+    let mut session = ctx.session().ok()?;
+    status::fetch_me(ctx, &mut session).await.ok()
 }
 
 /// A login request waiting for the user to approve it in a browser.
@@ -203,14 +229,11 @@ impl Pending {
             access_token: tokens.access_token,
             access_expires_at: unix_now() + tokens.expires_in,
             welcome,
+            member_id: tokens.member_id,
         }
         .save(&ctx.home)?;
         Ok(())
     }
-}
-
-fn step(number: u8, text: &str) {
-    println!("  {}  {}", ui::accent(number).bold(), text);
 }
 
 async fn wait_for_approval(

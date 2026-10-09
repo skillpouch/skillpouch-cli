@@ -2,12 +2,14 @@
 //! spinners. Machine output (`--json`) bypasses this module.
 
 mod card;
+mod live;
 mod spinner;
 mod theme;
 
 pub use card::{Card, meter};
+pub use live::{Ending, LiveBanner};
 pub use spinner::Spinner;
-pub use theme::{accent, dim, heading, rich, shades};
+pub use theme::{accent, dim, heading, rich};
 
 use console::Term;
 
@@ -65,19 +67,4 @@ pub fn banner(version: &str) {
         println!("  {}   {}", purple.apply_to(mark), text);
     }
     println!();
-}
-
-/// A code the user compares with the browser, framed so it stands out.
-pub fn code_box(code: &str) {
-    let border = &shades(false)[1];
-    let shown = code.replace('-', " · ");
-    let inner = console::measure_text_width(&shown) + 6;
-    println!("  {}", border.apply_to(format!("╭{}╮", "─".repeat(inner))));
-    println!(
-        "  {}   {}   {}",
-        border.apply_to("│"),
-        accent(&shown).bold(),
-        border.apply_to("│")
-    );
-    println!("  {}", border.apply_to(format!("╰{}╯", "─".repeat(inner))));
 }

@@ -1,9 +1,15 @@
+mod approve;
 mod browser;
 mod cli;
 mod commands;
 mod context;
+mod daemon;
 mod exit;
+mod names;
+mod setup;
+mod sync;
 mod ui;
+mod usage;
 mod when;
 
 use clap::Parser;

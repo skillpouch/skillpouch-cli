@@ -6,6 +6,7 @@ pub mod canonical;
 pub mod config;
 pub mod credentials;
 pub mod home;
+pub mod setup;
 
 pub use config::Config;
 pub use credentials::Credentials;
