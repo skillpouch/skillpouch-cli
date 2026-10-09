@@ -13,7 +13,7 @@ The `skillpouch` command-line tool and background sync daemon.
 | `crates/sp-tui/` | The terminal UI (ratatui): overview with the animated mascot, pouches (pick the one this computer syncs), token usage, computers, account. |
 | `crates/sp-usage/` | Token counts per day and model from Claude Code, Codex and OpenCode logs. Only counts leave the computer. |
 | `npm/skillpouch/` | The npm package `skillpouch` (`npx skillpouch …`): a launcher that runs the native binary from `@skillpouch/cli-<os>-<cpu>`. |
-| `scripts/` | `next-version.sh` (the next release version) and `npm-packages.mjs` (the npm packages of a release). |
+| `scripts/` | `release.mjs` (the steps semantic-release runs: verify, stamp, publish) and `npm-packages.mjs` (the platform packages of a release), with tests (`npm test`). |
 
 Server, web app and API contracts live in the separate `skillpouch` repository.
 
@@ -126,19 +126,29 @@ AGPL-3.0-only.
 
 ## Releases
 
-Pushing to the `release` branch releases (`.github/workflows/release.yml`):
+Releases are automatic: [semantic-release](https://semantic-release.gitbook.io)
+runs after CI passes on `main` (`.github/workflows/release.yml`, configured in
+`.releaserc.json`) and decides from the commit messages since the last release:
 
-```sh
-git push origin main:release
-```
+| commits since the last release                | release |
+| --------------------------------------------- | ------- |
+| only `docs`, `ci`, `chore`, `refactor`, `test` … | none    |
+| a `fix`, `perf` or `revert`                   | patch   |
+| a `feat`                                      | minor   |
+| a `!` or a `BREAKING CHANGE:` footer          | major   |
 
-- **Version:** the last `v*` tag, bumped by the commits since: `[major]` or
-  `BREAKING` in a message → major, `[minor]` or a message starting with `feat`
-  → minor, otherwise patch. Nobody edits a version by hand; the tag records it.
+Commit messages must follow Conventional Commits; CI rejects others. The rules
+are in [AGENTS.md](AGENTS.md).
+
+A release:
+
+- **Version and changelog:** writes `CHANGELOG.md`, stamps the version into
+  `Cargo.toml`, `Cargo.lock` and `npm/skillpouch/package.json`, commits them as
+  `chore(release): x.y.z [skip ci]` and tags `vx.y.z`. Nobody edits these by hand.
 - **Binaries:** static Linux (x64, arm64, musl), macOS (x64, arm64) and Windows
-  (x64, arm64), attached to a GitHub release with `SHA256SUMS`.
+  (x64, arm64), attached to the GitHub release with `SHA256SUMS`.
 - **npm:** `@skillpouch/cli-<os>-<cpu>` per platform (with `os`/`cpu`, so npm
-  installs only the matching one), then `skillpouch`, which lists them as
-  optional dependencies of the same version and runs the right binary. Published
-  with npm trusted publishing: each package trusts `skillpouch/skillpouch-cli`,
-  workflow `release.yml`; no token is stored.
+  installs only the matching one), then `skillpouch` (`@semantic-release/npm`),
+  which lists them as optional dependencies of the same version and runs the
+  right binary. Published with npm trusted publishing: each package trusts
+  `skillpouch/skillpouch-cli`, workflow `release.yml`; no token is stored.
