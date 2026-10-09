@@ -336,7 +336,8 @@ mod tests {
             "scripts/run.sh".into(),
             File {
                 bytes: b"echo".to_vec(),
-                exec: true,
+                // Windows has no executable bit to keep.
+                exec: cfg!(unix),
             },
         );
         pouch.write_item("skill", "pdf", &files)?;
