@@ -322,8 +322,6 @@ struct Layout {
     /// Skill folders it reads; links go into the first.
     skills: Vec<PathBuf>,
     /// Shared skill folders it also reads: when another assistant here
-    /// fills one, this one gets no links of its own (no skill twice).
-    also_reads: Vec<PathBuf>,
     agents: &'static [&'static str],
     commands: (&'static [&'static str], CommandFormat),
     agent_format: AgentFormat,
@@ -363,7 +361,6 @@ fn layouts(places: &Places) -> Vec<Layout> {
             root: places.claude.clone(),
             instructions: Some("CLAUDE.md"),
             skills: vec![claude_skills.clone()],
-            also_reads: vec![],
             agents: &["agents"],
             commands: (&["commands"], CommandFormat::Markdown),
             agent_format: AgentFormat::Claude,
@@ -380,7 +377,6 @@ fn layouts(places: &Places) -> Vec<Layout> {
             root: places.codex.clone(),
             instructions: Some("AGENTS.md"),
             skills: vec![shared_skills.clone(), places.codex.join("skills")],
-            also_reads: vec![],
             agents: &[],
             commands: (&["prompts"], CommandFormat::Hinted),
             agent_format: AgentFormat::Claude,
@@ -398,7 +394,6 @@ fn layouts(places: &Places) -> Vec<Layout> {
                 places.opencode.join("skills"),
                 places.opencode.join("skill"),
             ],
-            also_reads: vec![claude_skills.clone(), shared_skills.clone()],
             agents: &["agents", "agent"],
             commands: (&["commands", "command"], CommandFormat::OpenCode),
             agent_format: AgentFormat::OpenCode,
@@ -418,7 +413,6 @@ fn layouts(places: &Places) -> Vec<Layout> {
             root: places.gemini.clone(),
             instructions: Some("GEMINI.md"),
             skills: vec![places.gemini.join("skills")],
-            also_reads: vec![],
             agents: &["agents"],
             commands: (&["commands"], CommandFormat::Toml),
             agent_format: AgentFormat::Gemini,
@@ -432,7 +426,6 @@ fn layouts(places: &Places) -> Vec<Layout> {
             root: places.copilot.clone(),
             instructions: Some("copilot-instructions.md"),
             skills: vec![places.copilot.join("skills")],
-            also_reads: vec![shared_skills.clone()],
             agents: &["agents"],
             commands: (&[], CommandFormat::Markdown),
             agent_format: AgentFormat::Copilot,
@@ -452,11 +445,6 @@ fn layouts(places: &Places) -> Vec<Layout> {
             root: places.cursor.clone(),
             instructions: None,
             skills: vec![places.cursor.join("skills")],
-            also_reads: vec![
-                claude_skills.clone(),
-                shared_skills.clone(),
-                places.codex.join("skills"),
-            ],
             agents: &[],
             commands: (&["commands"], CommandFormat::Plain),
             agent_format: AgentFormat::Claude,
@@ -470,7 +458,6 @@ fn layouts(places: &Places) -> Vec<Layout> {
             root: places.windsurf.clone(),
             instructions: Some("memories/global_rules.md"),
             skills: vec![],
-            also_reads: vec![],
             agents: &[],
             commands: (&["global_workflows"], CommandFormat::Workflow),
             agent_format: AgentFormat::Claude,
@@ -487,7 +474,6 @@ fn layouts(places: &Places) -> Vec<Layout> {
             root: places.qwen.clone(),
             instructions: Some("QWEN.md"),
             skills: vec![],
-            also_reads: vec![],
             agents: &["agents"],
             commands: (&["commands"], CommandFormat::Toml),
             agent_format: AgentFormat::Gemini,
@@ -501,7 +487,6 @@ fn layouts(places: &Places) -> Vec<Layout> {
             root: places.factory.clone(),
             instructions: None,
             skills: vec![places.factory.join("skills")],
-            also_reads: vec![shared_skills.clone()],
             agents: &["droids"],
             commands: (&["commands"], CommandFormat::Hinted),
             agent_format: AgentFormat::Factory,
@@ -523,7 +508,6 @@ fn layouts(places: &Places) -> Vec<Layout> {
             root: places.crush.clone(),
             instructions: Some("CRUSH.md"),
             skills: vec![places.crush.join("skills")],
-            also_reads: vec![claude_skills, shared_skills],
             agents: &[],
             commands: (&[], CommandFormat::Markdown),
             agent_format: AgentFormat::Claude,
@@ -565,11 +549,10 @@ pub struct Target {
     pub read_only: Option<String>,
 }
 
-/// The assistants on this computer as places to link into. An assistant
-/// that also reads a shared skill folder another one here fills gets no
-/// skill links of its own, so no skill shows up twice.
+/// The assistants on this computer as places to link into. Every one gets
+/// links in its own skill folder, so each shows the pouch's skills where
+/// people look for them.
 pub fn targets(places: &Places) -> Vec<Target> {
-    let mut filled: Vec<PathBuf> = Vec::new();
     layouts(places)
         .into_iter()
         .filter(|layout| layout.root.is_dir())
@@ -581,13 +564,10 @@ pub fn targets(places: &Places) -> Vec<Target> {
                     repo.display()
                 )
             });
-            let shares = layout.also_reads.iter().any(|dir| filled.contains(dir));
-            let skills = (!shares && read_only.is_none())
+            let skills = read_only
+                .is_none()
                 .then(|| layout.skills.first().cloned())
                 .flatten();
-            if let Some(dir) = &skills {
-                filled.push(dir.clone());
-            }
             let (commands, format) = layout.commands;
             let mcp = layout
                 .mcp
@@ -840,8 +820,8 @@ mod tests {
             found[0].mcp,
             Some((h.join(".claude.json"), McpFormat::Claude))
         );
-        // OpenCode reads ~/.claude/skills already.
-        assert_eq!(found[1].skills, None);
+        // Its own folder, though it also reads ~/.claude/skills.
+        assert_eq!(found[1].skills, Some(h.join(".config/opencode/skills")));
         assert_eq!(
             found[1].agents,
             Some((h.join(".config/opencode/agents"), AgentFormat::OpenCode))
