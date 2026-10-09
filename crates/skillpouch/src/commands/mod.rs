@@ -13,7 +13,12 @@ use std::io::IsTerminal;
 use std::process::ExitCode;
 
 pub async fn run(cli: Cli) -> Result<ExitCode> {
-    let ctx = Context::load()?;
+    let ctx = match &cli.command {
+        Some(Command::Daemon {
+            action: DaemonAction::Run { home, api_url, .. },
+        }) => Context::load_with(home.clone(), api_url.clone())?,
+        _ => Context::load()?,
+    };
     let Some(command) = cli.command else {
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
             return tui::run(ctx).await;
@@ -35,7 +40,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
             DaemonAction::Start => sync::start(&ctx),
             DaemonAction::Stop => sync::stop(&ctx),
             DaemonAction::Status => sync::status(&ctx),
-            DaemonAction::Run => sync::run_daemon(&ctx).await,
+            DaemonAction::Run { background, .. } => sync::run_daemon(&ctx, background).await,
         },
     }
 }

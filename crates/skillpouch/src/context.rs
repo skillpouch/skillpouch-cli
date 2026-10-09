@@ -21,9 +21,19 @@ pub struct Context {
 
 impl Context {
     pub fn load() -> Result<Self> {
-        let home = Home::locate()?;
+        Self::load_with(None, None)
+    }
+
+    /// With the folder and the server given (else from the environment and
+    /// `config.toml`).
+    pub fn load_with(home: Option<std::path::PathBuf>, api_url: Option<String>) -> Result<Self> {
+        let home = match home {
+            Some(path) => Home::new(path),
+            None => Home::locate()?,
+        };
         let config = Config::load(&home)?;
-        let client = Client::new(&config.api_url(), &format!("skillpouch-cli/{VERSION}"))?;
+        let url = api_url.unwrap_or_else(|| config.api_url());
+        let client = Client::new(&url, &format!("skillpouch-cli/{VERSION}"))?;
         Ok(Self {
             home,
             config,

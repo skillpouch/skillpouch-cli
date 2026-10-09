@@ -353,7 +353,8 @@ pub fn start(ctx: &Context) -> Result<Started> {
         return Ok(Started::AlreadyRunning);
     }
     let exe = std::env::current_exe().context("couldn't find the skillpouch program")?;
-    if service::install(ctx, &exe).unwrap_or(false) {
+    let installed = service::install(ctx, &exe).unwrap_or(false);
+    if installed && service::STARTS_NOW {
         // Give the service a moment to take the lock.
         for _ in 0..20 {
             if running(ctx) {
@@ -363,7 +364,17 @@ pub fn start(ctx: &Context) -> Result<Started> {
         }
     }
     spawn(ctx, &exe)?;
-    Ok(Started::Process)
+    Ok(if installed {
+        Started::Service
+    } else {
+        Started::Process
+    })
+}
+
+/// Starts `daemon run` as a process of its own, without a window.
+pub fn spawn_detached(ctx: &Context) -> Result<()> {
+    let exe = std::env::current_exe().context("couldn't find the skillpouch program")?;
+    spawn(ctx, &exe)
 }
 
 fn spawn(ctx: &Context, exe: &Path) -> Result<()> {
@@ -374,7 +385,9 @@ fn spawn(ctx: &Context, exe: &Path) -> Result<()> {
         .open(&log.path)?;
     let mut command = std::process::Command::new(exe);
     command
-        .args(["daemon", "run"])
+        .args(["daemon", "run", "--home"])
+        .arg(ctx.home.root())
+        .args(["--api-url", ctx.client.base()])
         .stdin(std::process::Stdio::null())
         .stdout(out.try_clone()?)
         .stderr(out);
@@ -383,6 +396,14 @@ fn spawn(ctx: &Context, exe: &Path) -> Result<()> {
         use std::os::unix::process::CommandExt;
         // Its own process group: closing the terminal doesn't stop it.
         command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // No console window, and closing the terminal doesn't stop it.
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     }
     command
         .spawn()
@@ -419,7 +440,8 @@ fn kill(pid: u32) {
 }
 
 mod service {
-    //! User services: systemd (Linux) and launchd (macOS).
+    //! Starting at login: a systemd user service (Linux), a launchd agent
+    //! (macOS), or the user's `Run` registry key (Windows, no admin needed).
 
     use anyhow::Result;
     use std::path::Path;
@@ -550,13 +572,49 @@ mod service {
         Ok(true)
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    /// Installing also starts it (else the caller starts it).
+    pub const STARTS_NOW: bool = cfg!(any(target_os = "linux", target_os = "macos"));
+
+    #[cfg(windows)]
+    const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+    #[cfg(windows)]
+    const RUN_VALUE: &str = "SkillPouch";
+
+    /// The command Windows runs at login.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn login_command(exe: &Path, home: &Path, api_url: &str) -> String {
+        format!(
+            "\"{}\" daemon run --background --home \"{}\" --api-url \"{api_url}\"",
+            exe.display(),
+            home.display()
+        )
+    }
+
+    #[cfg(windows)]
+    pub fn install(ctx: &crate::context::Context, exe: &Path) -> Result<bool> {
+        let _ = PASSED_ON;
+        let command = login_command(exe, ctx.home.root(), ctx.client.base());
+        Ok(quiet(Command::new("reg").args([
+            "add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", &command, "/f",
+        ])))
+    }
+
+    #[cfg(windows)]
+    pub fn uninstall() -> Result<bool> {
+        let installed = quiet(Command::new("reg").args(["query", RUN_KEY, "/v", RUN_VALUE]));
+        if installed {
+            quiet(Command::new("reg").args(["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]));
+        }
+        Ok(installed)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     pub fn install(_ctx: &crate::context::Context, _exe: &Path) -> Result<bool> {
         let _ = (PASSED_ON, quiet as fn(&mut Command) -> bool);
         Ok(false)
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     pub fn uninstall() -> Result<bool> {
         Ok(false)
     }
@@ -565,6 +623,19 @@ mod service {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_windows_login_command_quotes_its_paths() {
+        let command = service::login_command(
+            Path::new(r"C:\Users\Ada Lovelace\bin\skillpouch.exe"),
+            Path::new(r"C:\Users\Ada Lovelace\.skillpouch"),
+            "https://skillpouch.net",
+        );
+        assert_eq!(
+            command,
+            r#""C:\Users\Ada Lovelace\bin\skillpouch.exe" daemon run --background --home "C:\Users\Ada Lovelace\.skillpouch" --api-url "https://skillpouch.net""#
+        );
+    }
 
     #[test]
     fn backoff_grows_to_a_limit() {

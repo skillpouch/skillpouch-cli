@@ -52,7 +52,12 @@ pub async fn once(ctx: &Context) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-pub async fn run_daemon(ctx: &Context) -> Result<ExitCode> {
+pub async fn run_daemon(ctx: &Context, background: bool) -> Result<ExitCode> {
+    if background && cfg!(windows) {
+        // Started at login with a console window: start again without one.
+        daemon::spawn_detached(ctx)?;
+        return Ok(ExitCode::SUCCESS);
+    }
     daemon::run(ctx).await?;
     Ok(ExitCode::SUCCESS)
 }

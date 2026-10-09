@@ -625,7 +625,7 @@ fn symlink(to: &Path, path: &Path, dir: bool) -> Result<()> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::item::{File, Files};

@@ -85,5 +85,15 @@ pub enum DaemonAction {
     Status,
     /// Run it in this terminal (what the service runs).
     #[command(hide = true)]
-    Run,
+    Run {
+        /// The SkillPouch folder (services can't always pass the environment).
+        #[arg(long)]
+        home: Option<std::path::PathBuf>,
+        /// The server.
+        #[arg(long)]
+        api_url: Option<String>,
+        /// Windows: start again without a console window, then exit.
+        #[arg(long)]
+        background: bool,
+    },
 }
