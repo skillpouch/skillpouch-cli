@@ -78,7 +78,9 @@ async fn serve(
     // Setup is offered once per run; skipped, it waits for the Account tab.
     let offered = Arc::new(AtomicBool::new(false));
     let starting = Arc::clone(&ctx);
-    tokio::spawn(async move { keep_syncing(&starting).await });
+    tokio::spawn(async move {
+        let _ = tokio::task::spawn_blocking(move || daemon::ensure_running(&starting)).await;
+    });
     let watcher = tokio::spawn(watch_sync(Arc::clone(&ctx), updates.clone()));
 
     while let Some(request) = requests.recv().await {

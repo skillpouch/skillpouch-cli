@@ -11,6 +11,7 @@ use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
+use sp_harness::POUCH_KINDS;
 use sp_harness::{Harness, Kind};
 
 /// Width of the assistant list beside the preview.
@@ -37,6 +38,7 @@ pub fn draw(app: &App, setup: &Setup, dashboard: &Dashboard, frame: &mut Frame, 
         Step::Pouch => pouch_step(app, setup, dashboard),
         Step::Mode => mode_step(setup, dashboard),
         Step::Assistant => return assistant_step(setup, dashboard, frame, body, footer),
+        Step::Choose => choose_step(setup),
         Step::Confirm => confirm_step(app, setup, dashboard),
     };
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
@@ -72,6 +74,13 @@ fn draw_footer(setup: &Setup, frame: &mut Frame, area: Rect) {
             ("q", "quit"),
         ],
         Step::Confirm => &[("enter", "save"), ("esc", "back"), ("q", "quit")],
+        Step::Choose => &[
+            ("↑↓", "move"),
+            ("space", "on / off"),
+            ("enter", "choose"),
+            ("esc", "back"),
+            ("q", "quit"),
+        ],
         _ => &[
             ("↑↓", "move"),
             ("enter", "choose"),
@@ -302,6 +311,80 @@ fn contents(harness: &Harness, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
+fn choose_step(setup: &Setup) -> Vec<Line<'static>> {
+    let mut lines = title(
+        "What should sync on this computer?",
+        "Everything is on unless you turn it off. Change it later on the Sync tab.",
+    );
+    let mark = |on: bool| {
+        if on {
+            Span::styled("● on ", theme::accent())
+        } else {
+            Span::styled("○ off", theme::meta())
+        }
+    };
+    let width = setup
+        .assistants
+        .iter()
+        .map(|harness| harness.name.len())
+        .chain(POUCH_KINDS.iter().map(|(_, label)| label.len()))
+        .max()
+        .unwrap_or(12);
+    lines.push(Line::styled("Assistants", theme::meta()));
+    if setup.assistants.is_empty() {
+        lines.push(Line::styled(
+            "  None found on this computer yet.",
+            theme::muted(),
+        ));
+    }
+    for (index, harness) in setup.assistants.iter().enumerate() {
+        let on = !setup.skip_assistants.contains(harness.id);
+        lines.push(row(
+            index == setup.cursor,
+            harness.name.into(),
+            width,
+            vec![mark(on)],
+        ));
+    }
+    lines.push(Line::default());
+    lines.push(Line::styled("Synced into them", theme::meta()));
+    for (index, (kind, label)) in POUCH_KINDS.iter().enumerate() {
+        let on = !setup.skip_kinds.contains(*kind);
+        let selected = setup.assistants.len() + index == setup.cursor;
+        lines.push(row(selected, (*label).into(), width, vec![mark(on)]));
+    }
+    lines.push(Line::default());
+    lines.push(row(
+        setup.cursor == setup.continue_row(),
+        "Continue".into(),
+        width,
+        vec![],
+    ));
+    error(setup, &mut lines);
+    lines
+}
+
+/// `Everything`, or what is left out.
+fn chosen_words(setup: &Setup) -> String {
+    let mut off: Vec<String> = setup
+        .assistants
+        .iter()
+        .filter(|harness| setup.skip_assistants.contains(harness.id))
+        .map(|harness| harness.name.to_string())
+        .collect();
+    off.extend(
+        POUCH_KINDS
+            .iter()
+            .filter(|(kind, _)| setup.skip_kinds.contains(*kind))
+            .map(|(_, label)| label.to_lowercase()),
+    );
+    if off.is_empty() {
+        "Everything, into every assistant".into()
+    } else {
+        format!("Everything except {}", off.join(", "))
+    }
+}
+
 fn confirm_step(app: &App, setup: &Setup, dashboard: &Dashboard) -> Vec<Line<'static>> {
     let pouch = setup.chosen_pouch(dashboard);
     let name = pouch.map_or_else(|| "the pouch".into(), |pouch| pouch.label());
@@ -346,6 +429,17 @@ fn confirm_step(app: &App, setup: &Setup, dashboard: &Dashboard) -> Vec<Line<'st
         vec![Span::styled(first, theme::text())],
     ));
     lines.push(field("", vec![Span::styled(then, theme::muted())]));
+    lines.push(field(
+        "Syncs",
+        vec![Span::styled(chosen_words(setup), theme::text())],
+    ));
+    lines.push(field(
+        "Then",
+        vec![Span::styled(
+            "Syncs on its own in the background, from now on and after every restart",
+            theme::muted(),
+        )],
+    ));
     lines.push(field(
         "Backups",
         vec![Span::styled(
@@ -434,8 +528,22 @@ mod tests {
         }
 
         press(&mut app, KeyCode::Enter);
+        let text = screen(&app, 110, 40);
+        for expected in [
+            "What should sync on this computer?",
+            "Assistants",
+            "Claude Code",
+            "MCP servers",
+            "● on",
+            "› Continue",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?}:\n{text}");
+        }
+        press(&mut app, KeyCode::Enter);
         let text = screen(&app, 110, 30);
         for expected in [
+            "Everything, into every assistant",
+            "Syncs on its own in the background",
             "Ready to set up laptop",
             "Start from Claude Code",
             "CLAUDE.md, 2 skills and 1 MCP server go into Pouch 2",
@@ -460,6 +568,7 @@ mod tests {
             assert!(text.contains(expected), "missing {expected:?}:\n{text}");
         }
         press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Enter);
         press(&mut app, KeyCode::Enter);
         press(&mut app, KeyCode::Enter);
         let text = screen(&app, 110, 30);

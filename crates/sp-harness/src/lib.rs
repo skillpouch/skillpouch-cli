@@ -18,6 +18,18 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Every kind a pouch holds, as the pouch names them and as people read
+/// them; a computer can turn each off.
+pub const POUCH_KINDS: [(&str, &str); 7] = [
+    ("instructions", "Instructions"),
+    ("skill", "Skills"),
+    ("agent", "Agents"),
+    ("command", "Commands"),
+    ("mcp_server", "MCP servers"),
+    ("hook", "Hooks"),
+    ("plugin", "Plugins"),
+];
+
 /// What an item is, in the order the setup screen lists them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Kind {

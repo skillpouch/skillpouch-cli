@@ -12,6 +12,7 @@ use crate::context::{Context, Session, VERSION};
 use crate::sync::{self, Report};
 use anyhow::{Context as _, Result};
 use sp_core::home::user_home;
+use sp_core::setup::SetupRecord;
 use sp_harness::Places;
 use sp_sync::status::{Phase, SyncStatus};
 use std::collections::hash_map::DefaultHasher;
@@ -149,6 +150,7 @@ pub async fn run(ctx: &Context) -> Result<()> {
             },
         };
 
+        tell_news(ctx);
         let baseline = local_signature(ctx);
         let woke = async {
             match waiting_on {
@@ -182,6 +184,19 @@ fn backoff(failures: u32, base: u64, max: u64) -> Duration {
     Duration::from_secs(base.saturating_mul(1 << failures.min(6)).min(max))
 }
 
+/// Desktop notification for what needs the person, once per thing.
+fn tell_news(ctx: &Context) {
+    let Some(mut status) = SyncStatus::load(&ctx.home) else {
+        return;
+    };
+    if let Some((title, body)) = crate::notify::news(&mut status, ctx.client.base()) {
+        let _ = status.save(&ctx.home);
+        crate::notify::show(&title, &body);
+    } else {
+        let _ = status.save(&ctx.home);
+    }
+}
+
 fn set_pid(ctx: &Context, pid: Option<u32>) {
     let mut status = SyncStatus::load(&ctx.home).unwrap_or(SyncStatus {
         phase: Phase::Idle,
@@ -191,6 +206,8 @@ fn set_pid(ctx: &Context, pid: Option<u32>) {
         sent: 0,
         received: 0,
         conflicts: 0,
+        conflicts_notified: 0,
+        problem_notified: None,
         daemon_pid: None,
         updated_at: sync::now(),
     });
@@ -347,9 +364,29 @@ pub enum Started {
     Process,
 }
 
+/// Set when someone stops the background sync on purpose: it isn't started
+/// again behind their back until they start it (or set the computer up).
+fn stopped_marker(ctx: &Context) -> PathBuf {
+    ctx.home.run_dir().join("stopped")
+}
+
+/// Starts the background sync if this computer is set up and it isn't
+/// running (and wasn't stopped on purpose). Quiet: never fails a command.
+pub fn ensure_running(ctx: &Context) {
+    let set_up = ctx
+        .credentials()
+        .ok()
+        .flatten()
+        .is_some_and(|credentials| !SetupRecord::needed(&ctx.home, &credentials.device_id));
+    if set_up && !running(ctx) && !stopped_marker(ctx).exists() {
+        let _ = start(ctx);
+    }
+}
+
 /// Makes sure a background sync runs, installing it as a service where
 /// the system has one.
 pub fn start(ctx: &Context) -> Result<Started> {
+    let _ = fs::remove_file(stopped_marker(ctx));
     if running(ctx) {
         return Ok(Started::AlreadyRunning);
     }
@@ -412,6 +449,15 @@ fn spawn(ctx: &Context, exe: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Stops the background sync and keeps it from starting at login, until
+/// it's started again (`skillpouch daemon start`, or setting up).
+pub fn stop_on_purpose(ctx: &Context) -> Result<bool> {
+    let stopped = stop(ctx)?;
+    fs::create_dir_all(ctx.home.run_dir())?;
+    fs::write(stopped_marker(ctx), b"")?;
+    Ok(stopped)
+}
+
 /// Stops the background sync and keeps it from starting at login.
 pub fn stop(ctx: &Context) -> Result<bool> {
     let had_service = service::uninstall().unwrap_or(false);
@@ -449,7 +495,7 @@ mod service {
     use std::process::{Command, Stdio};
 
     /// Settings passed on so the service talks to the same server and folder.
-    const PASSED_ON: [&str; 2] = ["SKILLPOUCH_HOME", "SKILLPOUCH_API_URL"];
+    const PASSED_ON: [&str; 3] = ["HOME", "SKILLPOUCH_HOME", "SKILLPOUCH_API_URL"];
 
     fn quiet(command: &mut Command) -> bool {
         command

@@ -13,15 +13,7 @@ use sp_sync::release::Released;
 use sp_sync::status::Phase;
 
 /// The kinds, as the pouch names them and as people read them.
-pub const KINDS: [(&str, &str); 7] = [
-    ("instructions", "Instructions"),
-    ("skill", "Skills"),
-    ("agent", "Agents"),
-    ("command", "Commands"),
-    ("mcp_server", "MCP servers"),
-    ("hook", "Hooks"),
-    ("plugin", "Plugins"),
-];
+pub const KINDS: [(&str, &str); 7] = sp_harness::POUCH_KINDS;
 
 /// An assistant or a kind, by id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

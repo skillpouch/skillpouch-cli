@@ -32,6 +32,12 @@ pub async fn save(ctx: &Context, choice: SetupChoice) -> Result<()> {
         .set_active_pouch(&session.key, &token, Some(&choice.pouch_id))
         .await
         .map_err(signed_out)?;
+    let mut config = sp_core::Config::load(&ctx.home)?;
+    config.sync = sp_core::SyncChoice {
+        skip_assistants: choice.skip_assistants.iter().cloned().collect(),
+        skip_kinds: choice.skip_kinds.iter().cloned().collect(),
+    };
+    config.save(&ctx.home)?;
     record(
         &session.credentials.device_id,
         choice,
@@ -91,6 +97,8 @@ mod tests {
             SetupChoice {
                 pouch_id: "p1".into(),
                 first_sync: sp_tui::FirstSync::Merge("claude-code".into()),
+                skip_assistants: Vec::new(),
+                skip_kinds: Vec::new(),
             },
             at,
         );

@@ -60,7 +60,7 @@ pub async fn once(ctx: &Context) -> Result<ExitCode> {
         ui::warn(problem);
     }
     if !daemon::running(ctx) {
-        ui::hint("Keep it in sync automatically: `skillpouch daemon start`.");
+        ui::hint("Background sync is off because it was stopped: `skillpouch daemon start`.");
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -90,7 +90,7 @@ pub fn start(ctx: &Context) -> Result<ExitCode> {
 }
 
 pub fn stop(ctx: &Context) -> Result<ExitCode> {
-    if daemon::stop(ctx)? {
+    if daemon::stop_on_purpose(ctx)? {
         ui::success("Background sync stopped.");
     } else {
         ui::warn("Background sync wasn't running.");

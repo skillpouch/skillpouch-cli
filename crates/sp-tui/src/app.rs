@@ -872,6 +872,8 @@ pub(crate) mod tests {
         // Dashboard keys don't reach the tabs.
         press(&mut app, KeyCode::Char('3'));
         assert_eq!(app.tab, Tab::Overview);
+        // Use the pouch, keep everything on, save.
+        press(&mut app, KeyCode::Enter);
         press(&mut app, KeyCode::Enter);
         assert!(matches!(
             press(&mut app, KeyCode::Enter),

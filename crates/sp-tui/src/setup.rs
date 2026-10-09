@@ -3,17 +3,20 @@
 //!
 //! An empty pouch starts from one assistant's setup (or from nothing). A
 //! pouch with items asks first: take the pouch as it is, merge both, or
-//! replace the pouch with this computer's setup.
+//! replace the pouch with this computer's setup. Then: which assistants and
+//! which kinds this computer syncs. After that everything runs on its own.
 
 use crate::model::{Dashboard, FirstSync, Pouch, Request, SetupChoice};
 use ratatui::crossterm::event::KeyCode;
-use sp_harness::Harness;
+use sp_harness::{Harness, POUCH_KINDS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
     Pouch,
     Mode,
     Assistant,
+    /// Which assistants and kinds sync here.
+    Choose,
     Confirm,
 }
 
@@ -73,6 +76,10 @@ pub struct Setup {
     pub mode: Option<Mode>,
     /// Index into `assistants`; `None` with an empty pouch starts empty.
     pub assistant: Option<usize>,
+    /// Ids of the assistants turned off.
+    pub skip_assistants: std::collections::BTreeSet<String>,
+    /// Kinds turned off.
+    pub skip_kinds: std::collections::BTreeSet<String>,
     pub saving: bool,
     pub error: Option<String>,
 }
@@ -92,6 +99,8 @@ impl Setup {
             pouch: None,
             mode: None,
             assistant: None,
+            skip_assistants: Default::default(),
+            skip_kinds: Default::default(),
             saving: false,
             error: None,
         }
@@ -104,6 +113,8 @@ impl Setup {
             Step::Mode => Mode::ALL.len(),
             // An empty pouch can also start with nothing.
             Step::Assistant => self.assistants.len() + usize::from(self.mode.is_none()),
+            // Assistants, kinds, then "Continue".
+            Step::Choose => self.assistants.len() + POUCH_KINDS.len() + 1,
             Step::Confirm => 0,
         }
     }
@@ -135,6 +146,8 @@ impl Setup {
         Some(SetupChoice {
             pouch_id: self.pouch.clone()?,
             first_sync,
+            skip_assistants: self.skip_assistants.iter().cloned().collect(),
+            skip_kinds: self.skip_kinds.iter().cloned().collect(),
         })
     }
 
@@ -151,6 +164,10 @@ impl Setup {
             }
             KeyCode::Up | KeyCode::Char('k') if rows > 0 => {
                 self.cursor = self.cursor.checked_sub(1).unwrap_or(rows - 1);
+                Outcome::Stay
+            }
+            KeyCode::Char(' ') if self.step == Step::Choose => {
+                self.toggle();
                 Outcome::Stay
             }
             KeyCode::Enter => self.choose(dashboard),
@@ -186,14 +203,21 @@ impl Setup {
                 if mode.needs_assistant() {
                     self.go(Step::Assistant, 0);
                 } else {
-                    self.go(Step::Confirm, 0);
+                    self.go(Step::Choose, self.continue_row());
                 }
             }
             Step::Assistant => {
                 // The row after the assistants is "start empty".
                 self.assistant = (self.cursor < self.assistants.len()).then_some(self.cursor);
-                self.go(Step::Confirm, 0);
+                // What the first sync starts from stays on.
+                if let Some(harness) = self.chosen_assistant() {
+                    let id = harness.id.to_string();
+                    self.skip_assistants.remove(&id);
+                }
+                self.go(Step::Choose, self.continue_row());
             }
+            Step::Choose if self.cursor < self.continue_row() => self.toggle(),
+            Step::Choose => self.go(Step::Confirm, 0),
             Step::Confirm => {
                 let Some(choice) = self.choice() else {
                     return Outcome::Stay;
@@ -221,15 +245,53 @@ impl Setup {
                 let row = self.pouch_row(dashboard);
                 self.go(Step::Pouch, row);
             }
-            Step::Confirm => match self.mode {
+            Step::Choose => match self.mode {
                 Some(mode) if !mode.needs_assistant() => self.go(Step::Mode, mode_row(self.mode)),
                 _ => {
                     let row = self.assistant.unwrap_or(self.assistants.len());
                     self.go(Step::Assistant, row);
                 }
             },
+            Step::Confirm => self.go(Step::Choose, self.continue_row()),
         }
         Outcome::Stay
+    }
+
+    /// The "Continue" row of the choose step.
+    pub fn continue_row(&self) -> usize {
+        self.assistants.len() + POUCH_KINDS.len()
+    }
+
+    /// Turns the assistant or kind under the cursor on or off.
+    fn toggle(&mut self) {
+        let cursor = self.cursor;
+        if let Some(harness) = self.assistants.get(cursor) {
+            let id = harness.id.to_string();
+            if self
+                .chosen_assistant()
+                .is_some_and(|chosen| chosen.id == id)
+            {
+                self.error = Some(format!(
+                    "{} is what the first sync starts from, so it stays on.",
+                    harness.name
+                ));
+            } else if !self.skip_assistants.remove(&id) {
+                self.skip_assistants.insert(id);
+            }
+            return;
+        }
+        let Some((kind, _)) = POUCH_KINDS.get(cursor - self.assistants.len()) else {
+            return;
+        };
+        let kind = kind.to_string();
+        if self.skip_kinds.remove(&kind) {
+            return;
+        }
+        if self.skip_kinds.len() + 1 == POUCH_KINDS.len() {
+            self.error = Some("Leave at least one kind on.".into());
+        } else {
+            self.skip_kinds.insert(kind);
+        }
     }
 
     fn pouch_row(&self, dashboard: &Dashboard) -> usize {
@@ -314,12 +376,30 @@ pub(crate) mod tests {
         assert_eq!(setup.rows(&board), 3);
         assert_eq!(setup.highlighted().map(|h| h.id), Some("claude-code"));
         keys(&mut setup, &board, &[KeyCode::Enter]);
+        assert_eq!(setup.step, Step::Choose);
+        // Codex off, hooks off; Claude Code feeds the first sync, so it stays.
+        setup.cursor = 1;
+        keys(&mut setup, &board, &[KeyCode::Char(' ')]);
+        setup.cursor = 0;
+        keys(&mut setup, &board, &[KeyCode::Char(' ')]);
+        assert!(
+            setup
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("stays on"))
+        );
+        setup.cursor = 2 + 5;
+        keys(&mut setup, &board, &[KeyCode::Enter]);
+        setup.cursor = setup.continue_row();
+        keys(&mut setup, &board, &[KeyCode::Enter]);
         assert_eq!(setup.step, Step::Confirm);
         assert_eq!(
             keys(&mut setup, &board, &[KeyCode::Enter]),
             Outcome::Send(Request::FinishSetup(SetupChoice {
                 pouch_id: board.pouches[1].id.clone(),
                 first_sync: FirstSync::Fill(Some("claude-code".into())),
+                skip_assistants: vec!["codex".into()],
+                skip_kinds: vec!["hook".into()],
             }))
         );
         // Waiting for the save: keys do nothing.
@@ -349,7 +429,8 @@ pub(crate) mod tests {
         assert_eq!(setup.step, Step::Mode);
         // Use the pouch: nothing to pick from this computer.
         keys(&mut setup, &board, &[KeyCode::Enter]);
-        assert_eq!(setup.step, Step::Confirm);
+        assert_eq!(setup.step, Step::Choose);
+        assert_eq!(setup.cursor, setup.continue_row());
         assert_eq!(
             setup.choice().map(|c| c.first_sync),
             Some(FirstSync::UsePouch)
@@ -362,6 +443,7 @@ pub(crate) mod tests {
             &board,
             &[KeyCode::Down, KeyCode::Enter, KeyCode::Down, KeyCode::Enter],
         );
+        assert_eq!(setup.step, Step::Choose);
         assert_eq!(
             setup.choice().map(|c| c.first_sync),
             Some(FirstSync::Merge("codex".into()))

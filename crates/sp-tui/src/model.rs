@@ -179,6 +179,10 @@ pub enum Request {
 pub struct SetupChoice {
     pub pouch_id: String,
     pub first_sync: FirstSync,
+    /// Assistants this computer leaves alone (ids).
+    pub skip_assistants: Vec<String>,
+    /// Kinds this computer doesn't sync (`hook`).
+    pub skip_kinds: Vec<String>,
 }
 
 /// How the first sync treats what's in the pouch and on this computer.

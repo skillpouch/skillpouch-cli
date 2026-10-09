@@ -260,6 +260,8 @@ fn base_status(ctx: &Context, phase: Phase, pouch_id: Option<&str>) -> SyncStatu
         sent: old.as_ref().map_or(0, |s| s.sent),
         received: old.as_ref().map_or(0, |s| s.received),
         conflicts: old.as_ref().map_or(0, |s| s.conflicts),
+        conflicts_notified: old.as_ref().map_or(0, |s| s.conflicts_notified),
+        problem_notified: old.as_ref().and_then(|s| s.problem_notified.clone()),
         daemon_pid: old.as_ref().and_then(|s| s.daemon_pid),
         updated_at: now(),
     }
@@ -834,6 +836,8 @@ mod tests {
             sent: 0,
             received: 0,
             conflicts: 0,
+            conflicts_notified: 0,
+            problem_notified: None,
             daemon_pid: Some(1),
             updated_at: "2026-10-09T11:55:00Z".into(),
         }

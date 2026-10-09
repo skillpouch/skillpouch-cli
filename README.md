@@ -35,6 +35,15 @@ skillpouch --version
 
 ### How syncing works
 
+SkillPouch runs on its own. `skillpouch login` goes straight on to setup
+(which pouch, how the first sync starts, which assistants and kinds), and once
+that's saved the background sync starts and keeps running, also after restarts.
+Any `skillpouch` command starts it again if it isn't running (unless it was
+stopped with `skillpouch daemon stop`). What needs a person reaches them
+without a command: a desktop notification once, and the web app (a banner on
+the pouch, a badge on its card) until it's dealt with. Commands are for looking
+(`skillpouch` for usage and status) and changing things (switching pouches).
+
 - The active pouch lives as plain files in `~/.skillpouch/pouches/<id>/`, one folder
   per item (`skills/pdf/SKILL.md`, `agents/reviewer/AGENT.md`,
   `mcp-servers/github/server.json`). `~/.skillpouch/current` points at it.

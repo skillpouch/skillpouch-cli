@@ -120,8 +120,10 @@ pub async fn run(
         }
         None => ui::success(format!("Logged in as {}", pending.device_name)),
     }
-    println!();
-    ui::hint("Run `skillpouch` to choose what this computer syncs.");
+    if !crate::commands::interactive() {
+        println!();
+        ui::hint("Run `skillpouch` to choose what this computer syncs.");
+    }
     Ok(ExitCode::SUCCESS)
 }
 

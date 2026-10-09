@@ -37,6 +37,12 @@ pub struct SyncStatus {
     /// Conflicts in the pouch waiting to be resolved in the web app.
     #[serde(default)]
     pub conflicts: usize,
+    /// Conflicts the person was told about (a desktop notification).
+    #[serde(default)]
+    pub conflicts_notified: usize,
+    /// The last problem the person was told about.
+    #[serde(default)]
+    pub problem_notified: Option<String>,
     /// The background process keeping this up to date.
     pub daemon_pid: Option<u32>,
     pub updated_at: String,

@@ -6,6 +6,7 @@ mod context;
 mod daemon;
 mod exit;
 mod names;
+mod notify;
 mod setup;
 mod sync;
 mod ui;
