@@ -44,6 +44,8 @@
 		[
 			"@semantic-release/github",
 			{
+				"releaseNameTemplate": "v${nextRelease.version}",
+				"releaseBodyTemplate": "${nextRelease.notes}",
 				"assets": [{ "path": "release-assets/*" }],
 				"successComment": false,
 				"failComment": false,
