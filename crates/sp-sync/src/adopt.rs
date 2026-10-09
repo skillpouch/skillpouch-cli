@@ -4,8 +4,9 @@
 //! a config → `mcp-servers/x/server.json`.
 
 use crate::item::{self, File, Files, LocalItem, PouchDir, Skipped};
+use crate::translate;
 use crate::{Result, mcp};
-use sp_harness::{Harness, Kind, McpFormat};
+use sp_harness::{AgentFormat, CommandFormat, Harness, Kind, McpFormat};
 use std::fs;
 use std::path::PathBuf;
 
@@ -34,8 +35,17 @@ pub fn format_of(harness_id: &str) -> McpFormat {
 /// git checkout the originals stay where they are (no `origin`).
 pub fn found_in(harness: &Harness) -> Vec<Found> {
     let movable = sp_harness::git_checkout(&harness.root).is_none();
+    let (agent_format, command_format) =
+        sp_harness::formats(harness.id).unwrap_or((AgentFormat::Claude, CommandFormat::Markdown));
     let mut out = Vec::new();
     for found in &harness.items {
+        // A file in the assistant's dialect, in the pouch's.
+        let translated = |main: &str, back: &dyn Fn(&str) -> Option<String>| -> Option<Files> {
+            let text = fs::read_to_string(&found.path).ok()?;
+            let mut files = Files::new();
+            files.insert(main.to_string(), File::new(back(&text)?));
+            Some(files)
+        };
         let single = |main: &str| -> Option<Files> {
             let bytes = fs::read(&found.path).ok()?;
             let mut files = Files::new();
@@ -60,27 +70,28 @@ pub fn found_in(harness: &Harness) -> Vec<Found> {
                 // The link goes where the folder was, so the folder name wins.
                 ("skill", item::safe_name(&folder), files, true)
             }
-            Kind::Agent => (
-                "agent",
-                item::safe_name(&found.name),
-                single("AGENT.md"),
-                true,
-            ),
-            Kind::Command if found.path.extension().is_some_and(|ext| ext == "md") => (
-                "command",
-                item::safe_name(&found.name),
-                single("COMMAND.md"),
-                true,
-            ),
+            Kind::Agent => {
+                let name = item::safe_name(&found.name);
+                let files = match agent_format {
+                    AgentFormat::Claude => single("AGENT.md"),
+                    format => translated("AGENT.md", &|text| {
+                        Some(translate::agent_from(
+                            format,
+                            text,
+                            "",
+                            name.as_deref().unwrap_or_default(),
+                        ))
+                    }),
+                };
+                ("agent", name, files, true)
+            }
             Kind::Command => {
-                let markdown = fs::read_to_string(&found.path)
-                    .ok()
-                    .and_then(|text| crate::command::from_toml(&text, ""));
-                let files = markdown.map(|text| {
-                    let mut files = Files::new();
-                    files.insert("COMMAND.md".to_string(), File::new(text));
-                    files
-                });
+                let files = match command_format {
+                    CommandFormat::Markdown => single("COMMAND.md"),
+                    format => translated("COMMAND.md", &|text| {
+                        translate::command_from(format, text, "")
+                    }),
+                };
                 ("command", item::safe_name(&found.name), files, true)
             }
             Kind::McpServer => {
@@ -140,9 +151,9 @@ pub fn adopt(
         let known = !replace
             && existing
                 .values()
-                .any(|other| other.kind == item.kind && other.files == item.files);
+                .any(|other| other.kind == item.kind && same_files(other, item));
         let name = match existing.get(&key) {
-            Some(current) if current.files == item.files => None,
+            Some(current) if same_files(current, item) => None,
             _ if known => None,
             Some(_) if !replace => {
                 let taken = |name: &str| existing.contains_key(&item::key(&item.kind, name));
@@ -172,6 +183,30 @@ pub fn adopt(
         }
     }
     Ok(adopted)
+}
+
+/// The same content. Agents and commands come from other dialects, so their
+/// main file only has to say the same thing.
+fn same_files(a: &LocalItem, b: &LocalItem) -> bool {
+    if a.files == b.files {
+        return true;
+    }
+    let Some(main) =
+        item::main_file(&a.kind).filter(|_| matches!(a.kind.as_str(), "agent" | "command"))
+    else {
+        return false;
+    };
+    let text = |item: &LocalItem| {
+        item.files
+            .get(main)
+            .map(|file| String::from_utf8_lossy(&file.bytes).into_owned())
+    };
+    a.files.len() == b.files.len()
+        && a.files.keys().eq(b.files.keys())
+        && a.files
+            .iter()
+            .all(|(path, file)| path == main || b.files.get(path) == Some(file))
+        && matches!((text(a), text(b)), (Some(x), Some(y)) if translate::same_document(&x, &y))
 }
 
 /// Moves every original of `found` into the backups, without adopting them.

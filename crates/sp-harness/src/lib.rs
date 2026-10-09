@@ -14,6 +14,7 @@ mod files;
 pub use config::strip_jsonc;
 pub use files::{IGNORED_DIRS, ignored_file};
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -221,22 +222,52 @@ impl McpFormat {
 }
 
 /// How an assistant stores a command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CommandFormat {
-    /// `<name>.md`, arguments as `$ARGUMENTS`.
+    /// The pouch's own: `<name>.md` with `description`, `argument-hint`,
+    /// `allowed-tools`, `model`; arguments as `$ARGUMENTS` (Claude Code).
     Markdown,
     /// `<name>.toml` with `description` and `prompt`, arguments as `{{args}}`
     /// (Gemini CLI, Qwen Code).
     Toml,
+    /// Markdown with `description`, `agent`, `model` (`provider/model`).
+    OpenCode,
+    /// Markdown with `description` and `argument-hint` (Codex prompts,
+    /// Factory commands).
+    Hinted,
+    /// Plain Markdown, no front matter (Cursor).
+    Plain,
+    /// A workflow: Markdown with `description` only (Windsurf).
+    Workflow,
 }
 
 impl CommandFormat {
     pub fn extension(self) -> &'static str {
         match self {
-            Self::Markdown => "md",
             Self::Toml => "toml",
+            _ => "md",
         }
     }
+}
+
+/// How an assistant stores an agent (a subagent with its own prompt).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentFormat {
+    /// The pouch's own: `name`, `description`, `tools: Read, Grep`, `model`
+    /// (Claude Code).
+    Claude,
+    /// `description`, `mode: subagent`, `tools` as a map of `tool: false`.
+    OpenCode,
+    /// `name`, `description`, `tools` as a list of `read_file`, … (Gemini
+    /// CLI, Qwen Code).
+    Gemini,
+    /// `name`, `description`, `tools` as aliases: `read`, `edit`, `shell`, …
+    Copilot,
+    /// `name`, `description`, `model: inherit`, `tools`: `Read`, `Execute`, …
+    /// (Factory droids).
+    Factory,
 }
 
 /// How an assistant stores hooks (commands it runs on its own events).
@@ -283,6 +314,7 @@ struct Layout {
     also_reads: Vec<PathBuf>,
     agents: &'static [&'static str],
     commands: (&'static [&'static str], CommandFormat),
+    agent_format: AgentFormat,
     mcp: Option<(Vec<PathBuf>, McpFormat)>,
     hooks: Option<(PathBuf, HookFormat)>,
     /// The config file plugins are turned on in; OpenCode's is its MCP file.
@@ -300,6 +332,15 @@ pub fn known() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
+/// How assistant `id` writes agents and commands.
+pub fn formats(id: &str) -> Option<(AgentFormat, CommandFormat)> {
+    let root = Path::new("/");
+    layouts(&Places::plain(root, root))
+        .into_iter()
+        .find(|layout| layout.id == id)
+        .map(|layout| (layout.agent_format, layout.commands.1))
+}
+
 fn layouts(places: &Places) -> Vec<Layout> {
     let claude_skills = places.claude.join("skills");
     let shared_skills = places.agents.join("skills");
@@ -313,6 +354,7 @@ fn layouts(places: &Places) -> Vec<Layout> {
             also_reads: vec![],
             agents: &["agents"],
             commands: (&["commands"], CommandFormat::Markdown),
+            agent_format: AgentFormat::Claude,
             mcp: Some((vec![places.claude_json.clone()], McpFormat::Claude)),
             hooks: Some((places.claude.join("settings.json"), HookFormat::Claude)),
             plugins: Some((
@@ -328,7 +370,8 @@ fn layouts(places: &Places) -> Vec<Layout> {
             skills: vec![shared_skills.clone(), places.codex.join("skills")],
             also_reads: vec![],
             agents: &[],
-            commands: (&["prompts"], CommandFormat::Markdown),
+            commands: (&["prompts"], CommandFormat::Hinted),
+            agent_format: AgentFormat::Claude,
             mcp: Some((vec![places.codex.join("config.toml")], McpFormat::Codex)),
             hooks: Some((places.codex.join("hooks.json"), HookFormat::Claude)),
             plugins: None,
@@ -345,7 +388,8 @@ fn layouts(places: &Places) -> Vec<Layout> {
             ],
             also_reads: vec![claude_skills.clone(), shared_skills.clone()],
             agents: &["agents", "agent"],
-            commands: (&["commands", "command"], CommandFormat::Markdown),
+            commands: (&["commands", "command"], CommandFormat::OpenCode),
+            agent_format: AgentFormat::OpenCode,
             mcp: Some((
                 vec![
                     places.opencode.join("opencode.json"),
@@ -365,6 +409,7 @@ fn layouts(places: &Places) -> Vec<Layout> {
             also_reads: vec![],
             agents: &["agents"],
             commands: (&["commands"], CommandFormat::Toml),
+            agent_format: AgentFormat::Gemini,
             mcp: Some((vec![places.gemini.join("settings.json")], McpFormat::Gemini)),
             hooks: Some((places.gemini.join("settings.json"), HookFormat::Gemini)),
             plugins: None,
@@ -378,6 +423,7 @@ fn layouts(places: &Places) -> Vec<Layout> {
             also_reads: vec![shared_skills.clone()],
             agents: &["agents"],
             commands: (&[], CommandFormat::Markdown),
+            agent_format: AgentFormat::Copilot,
             mcp: Some((
                 vec![places.copilot.join("mcp-config.json")],
                 McpFormat::Copilot,
@@ -400,7 +446,8 @@ fn layouts(places: &Places) -> Vec<Layout> {
                 places.codex.join("skills"),
             ],
             agents: &[],
-            commands: (&[], CommandFormat::Markdown),
+            commands: (&["commands"], CommandFormat::Plain),
+            agent_format: AgentFormat::Claude,
             mcp: Some((vec![places.cursor.join("mcp.json")], McpFormat::Claude)),
             hooks: Some((places.cursor.join("hooks.json"), HookFormat::Cursor)),
             plugins: None,
@@ -413,7 +460,8 @@ fn layouts(places: &Places) -> Vec<Layout> {
             skills: vec![],
             also_reads: vec![],
             agents: &[],
-            commands: (&[], CommandFormat::Markdown),
+            commands: (&["global_workflows"], CommandFormat::Workflow),
+            agent_format: AgentFormat::Claude,
             mcp: Some((
                 vec![places.windsurf.join("mcp_config.json")],
                 McpFormat::Windsurf,
@@ -428,8 +476,9 @@ fn layouts(places: &Places) -> Vec<Layout> {
             instructions: Some("QWEN.md"),
             skills: vec![],
             also_reads: vec![],
-            agents: &[],
+            agents: &["agents"],
             commands: (&["commands"], CommandFormat::Toml),
+            agent_format: AgentFormat::Gemini,
             mcp: Some((vec![places.qwen.join("settings.json")], McpFormat::Gemini)),
             hooks: Some((places.qwen.join("settings.json"), HookFormat::Claude)),
             plugins: None,
@@ -442,7 +491,8 @@ fn layouts(places: &Places) -> Vec<Layout> {
             skills: vec![places.factory.join("skills")],
             also_reads: vec![shared_skills.clone()],
             agents: &["droids"],
-            commands: (&["commands"], CommandFormat::Markdown),
+            commands: (&["commands"], CommandFormat::Hinted),
+            agent_format: AgentFormat::Factory,
             mcp: Some((vec![places.factory.join("mcp.json")], McpFormat::Claude)),
             // Droid reads `settings.json` hooks only while there's no `hooks.json`.
             hooks: Some(if places.factory.join("hooks.json").exists() {
@@ -464,6 +514,7 @@ fn layouts(places: &Places) -> Vec<Layout> {
             also_reads: vec![claude_skills, shared_skills],
             agents: &[],
             commands: (&[], CommandFormat::Markdown),
+            agent_format: AgentFormat::Claude,
             mcp: None,
             hooks: None,
             plugins: None,
@@ -492,7 +543,7 @@ pub struct Target {
     /// One folder per skill.
     pub skills: Option<PathBuf>,
     /// `<name>.md` per agent.
-    pub agents: Option<PathBuf>,
+    pub agents: Option<(PathBuf, AgentFormat)>,
     /// One file per command, in the assistant's format.
     pub commands: Option<(PathBuf, CommandFormat)>,
     pub mcp: Option<(PathBuf, McpFormat)>,
@@ -541,7 +592,10 @@ pub fn targets(places: &Places) -> Vec<Target> {
                 name: layout.name,
                 instructions: layout.instructions.map(|file| layout.root.join(file)),
                 skills,
-                agents: layout.agents.first().map(|dir| layout.root.join(dir)),
+                agents: layout
+                    .agents
+                    .first()
+                    .map(|dir| (layout.root.join(dir), layout.agent_format)),
                 commands: commands.first().map(|dir| (layout.root.join(dir), format)),
                 mcp,
                 hooks: layout.hooks,
@@ -599,6 +653,13 @@ fn scan(layout: &Layout, own: &files::Own) -> Harness {
     for folder in layout.agents {
         files::documents(&layout.root.join(folder), "md", false, Kind::Agent, own)
             .into_iter()
+            .map(|mut item| {
+                // Copilot also names them `<name>.agent.md`.
+                if let Some(name) = item.name.strip_suffix(".agent") {
+                    item.name = name.to_string();
+                }
+                item
+            })
             .for_each(&mut add);
     }
     let (folders, format) = layout.commands;
@@ -769,7 +830,10 @@ mod tests {
         );
         // OpenCode reads ~/.claude/skills already.
         assert_eq!(found[1].skills, None);
-        assert_eq!(found[1].agents, Some(h.join(".config/opencode/agents")));
+        assert_eq!(
+            found[1].agents,
+            Some((h.join(".config/opencode/agents"), AgentFormat::OpenCode))
+        );
         assert_eq!(
             found[1].mcp.as_ref().map(|(path, _)| path.clone()),
             Some(h.join(".config/opencode/opencode.jsonc"))

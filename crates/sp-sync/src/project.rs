@@ -17,12 +17,13 @@ use crate::hooks::{self, HookFile};
 use crate::item::{self, LocalItem};
 use crate::mcp::{self, Server};
 use crate::plugins::{self, PluginFile};
+use crate::translate;
 use crate::{Result, SyncError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sp_core::Home;
 use sp_core::home::{read_optional, write_private};
-use sp_harness::{CommandFormat, PluginFormat, Target};
+use sp_harness::{AgentFormat, CommandFormat, PluginFormat, Target};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -63,6 +64,10 @@ pub enum Render {
     Plain,
     /// `COMMAND.md` as a Gemini CLI TOML command.
     TomlCommand,
+    /// `AGENT.md` in an assistant's own dialect.
+    Agent(AgentFormat),
+    /// `COMMAND.md` in an assistant's own dialect.
+    Command(CommandFormat),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,25 +82,47 @@ fn hash(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
 
-fn render(render: Render, source: &[u8]) -> Vec<u8> {
+/// The item a pouch file belongs to: `…/agents/<name>/AGENT.md` → `<name>`.
+fn item_name(from: &Path) -> String {
+    from.parent()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn render(render: Render, source: &[u8], from: &Path) -> Vec<u8> {
+    let text = || String::from_utf8_lossy(source);
     match render {
         Render::Plain => source.to_vec(),
-        Render::TomlCommand => {
-            crate::command::to_toml(&String::from_utf8_lossy(source)).into_bytes()
+        Render::TomlCommand => translate::command_to(CommandFormat::Toml, &text()).into_bytes(),
+        Render::Agent(format) => {
+            translate::agent_to(format, &text(), &item_name(from)).into_bytes()
         }
+        Render::Command(format) => translate::command_to(format, &text()).into_bytes(),
     }
 }
 
 /// What to put back into the pouch file for an edited copy.
-fn unrender(render: Render, copy: &[u8], current: &[u8]) -> Option<Vec<u8>> {
-    match render {
-        Render::Plain => Some(copy.to_vec()),
-        Render::TomlCommand => crate::command::from_toml(
-            &String::from_utf8_lossy(copy),
-            &String::from_utf8_lossy(current),
-        )
-        .map(String::into_bytes),
+fn unrender(render: Render, copy: &[u8], current: &[u8], from: &Path) -> Option<Vec<u8>> {
+    if render == Render::Plain {
+        return Some(copy.to_vec());
     }
+    let (copy, current) = (
+        String::from_utf8_lossy(copy),
+        String::from_utf8_lossy(current),
+    );
+    match render {
+        Render::Plain => None,
+        Render::TomlCommand => translate::command_from(CommandFormat::Toml, &copy, &current),
+        Render::Agent(format) => Some(translate::agent_from(
+            format,
+            &copy,
+            &current,
+            &item_name(from),
+        )),
+        Render::Command(format) => translate::command_from(format, &copy, &current),
+    }
+    .map(String::into_bytes)
 }
 
 impl Projection {
@@ -176,7 +203,7 @@ impl Projection {
             let Ok(current) = fs::read(&copied.from) else {
                 continue;
             };
-            let Some(bytes) = unrender(copied.render, &now, &current) else {
+            let Some(bytes) = unrender(copied.render, &now, &current, &copied.from) else {
                 continue;
             };
             if bytes != current {
@@ -289,11 +316,19 @@ pub fn project(
                         },
                     )
                 }),
-                "agent" => target.agents.as_ref().map(|dir| {
-                    (
-                        dir.join(format!("{}.md", item.name)),
-                        file(source(&base, item, "AGENT.md")),
-                    )
+                "agent" => target.agents.as_ref().map(|(dir, format)| {
+                    let from = source(&base, item, "AGENT.md");
+                    let path = dir.join(format!("{}.md", item.name));
+                    match format {
+                        AgentFormat::Claude => (path, file(from)),
+                        format => (
+                            path,
+                            Place::Copy {
+                                from,
+                                render: Render::Agent(*format),
+                            },
+                        ),
+                    }
                 }),
                 "command" => target.commands.as_ref().map(|(dir, format)| {
                     let from = source(&base, item, "COMMAND.md");
@@ -305,6 +340,13 @@ pub fn project(
                             Place::Copy {
                                 from,
                                 render: Render::TomlCommand,
+                            },
+                        ),
+                        format => (
+                            path,
+                            Place::Copy {
+                                from,
+                                render: Render::Command(*format),
                             },
                         ),
                     }
@@ -477,7 +519,7 @@ fn place_copy(
     let Ok(source) = fs::read(from) else {
         return Ok((None, None));
     };
-    let bytes = render(render_as, &source);
+    let bytes = render(render_as, &source, from);
     let copied = Copied {
         from: from.to_path_buf(),
         render: render_as,
@@ -653,7 +695,7 @@ mod tests {
             root: root.to_path_buf(),
             instructions: Some(root.join("CLAUDE.md")),
             skills: Some(root.join("skills")),
-            agents: Some(root.join("agents")),
+            agents: Some((root.join("agents"), sp_harness::AgentFormat::Claude)),
             commands: Some((root.join("commands"), CommandFormat::Markdown)),
             mcp: Some((json.to_path_buf(), McpFormat::Claude)),
             hooks: None,

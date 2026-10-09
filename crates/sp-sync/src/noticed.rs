@@ -303,7 +303,7 @@ mod tests {
             root: claude.clone(),
             instructions: Some(claude.join("CLAUDE.md")),
             skills: Some(claude.join("skills")),
-            agents: Some(claude.join("agents")),
+            agents: Some((claude.join("agents"), sp_harness::AgentFormat::Claude)),
             commands: Some((claude.join("commands"), CommandFormat::Markdown)),
             mcp: Some((json.clone(), McpFormat::Claude)),
             hooks: None,

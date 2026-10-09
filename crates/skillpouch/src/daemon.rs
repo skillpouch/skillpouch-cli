@@ -283,7 +283,8 @@ pub fn local_signature(ctx: &Context) -> u64 {
                 add(path, false);
             }
             let commands = target.commands.as_ref().map(|(dir, _)| dir);
-            for dir in [target.skills.as_ref(), target.agents.as_ref(), commands]
+            let agents = target.agents.as_ref().map(|(dir, _)| dir);
+            for dir in [target.skills.as_ref(), agents, commands]
                 .into_iter()
                 .flatten()
             {

@@ -22,5 +22,6 @@ pub mod release;
 pub mod remote;
 pub mod state;
 pub mod status;
+pub mod translate;
 
 pub use error::{Result, SyncError};
