@@ -2,3 +2,7 @@ node_modules/
 target/
 .DS_Store
 *.tgz
+# release run leftovers
+.release-version
+binaries/
+release-assets/

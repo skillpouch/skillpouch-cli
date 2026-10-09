@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: AGPL-3.0-only
-// Builds the npm packages for one release:
+// Builds the platform packages for one release:
 //
 //   node scripts/npm-packages.mjs <version> <binaries-dir> <out-dir>
 //
 // <binaries-dir> holds one `skillpouch-<rust target>[.exe]` per platform.
 // Each becomes `@skillpouch/cli-<os>-<cpu>` (with `os` and `cpu` set, so npm
-// installs only the one that fits), and `skillpouch` itself lists them all as
-// optional dependencies of the same version; its launcher runs the right one.
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+// installs only the one that fits). `skillpouch` itself (npm/skillpouch) lists
+// them all as optional dependencies of the same version; its launcher runs the
+// right one. semantic-release publishes it after these.
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -67,23 +68,12 @@ export function build(version, binaries, out) {
 		built.push({ name, dir });
 	}
 	if (built.length === 0) throw new Error(`no binaries in ${binaries}`);
+	return built;
+}
 
-	const launcher = join(out, 'skillpouch');
-	mkdirSync(join(launcher, 'bin'), { recursive: true });
-	for (const file of ['bin/skillpouch.js', 'README.md', 'LICENSE']) {
-		const from = existsSync(join(root, 'npm/skillpouch', file))
-			? join(root, 'npm/skillpouch', file)
-			: join(root, file);
-		copyFileSync(from, join(launcher, file));
-	}
-	const optionalDependencies = Object.fromEntries(
-		Object.values(PLATFORMS).map((platform) => [packageName(platform), version]),
-	);
-	writeFileSync(
-		join(launcher, 'package.json'),
-		`${JSON.stringify({ ...main, version, optionalDependencies }, null, '\t')}\n`,
-	);
-	return { platforms: built, launcher };
+/** What `skillpouch` depends on: every platform package, at the same version. */
+export function optionalDependencies(version) {
+	return Object.fromEntries(Object.values(PLATFORMS).map((platform) => [packageName(platform), version]));
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -92,7 +82,5 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 		console.error('usage: npm-packages.mjs <version> <binaries-dir> <out-dir>');
 		process.exit(2);
 	}
-	const { platforms, launcher } = build(version, binaries, out);
-	for (const { name, dir } of platforms) console.log(`${name}\t${dir}`);
-	console.log(`skillpouch\t${launcher}`);
+	for (const { name, dir } of build(version, binaries, out)) console.log(`${name}\t${dir}`);
 }

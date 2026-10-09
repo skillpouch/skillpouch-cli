@@ -1,0 +1,8 @@
+#!/bin/sh
+# Refuses commit messages semantic-release can't read (see AGENTS.md).
+# Turned on by `npm install` (core.hooksPath = .githooks).
+if [ ! -x node_modules/.bin/commitlint ]; then
+	echo "commit-msg: run 'npm install' once so commit messages can be checked" >&2
+	exit 1
+fi
+exec node_modules/.bin/commitlint --edit "$1"

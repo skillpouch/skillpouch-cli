@@ -1,19 +1,31 @@
 name: release
 
-# Every push to the `release` branch ships a new version: the version comes
-# from the last `v*` tag and the commits since (scripts/next-version.sh), the
-# binaries are built for every platform, and npm gets `skillpouch` plus one
-# `@skillpouch/cli-<os>-<cpu>` package per platform. Nothing in the repository
-# changes; the tag is the record of what was released.
+# After CI passes on main, semantic-release decides from the commit messages
+# whether to release (see AGENTS.md):
 #
-#   git push origin main:release
+#   fix: / perf:              → patch
+#   feat:                     → minor
+#   `!` or BREAKING CHANGE:   → major
+#   docs:, ci:, chore:, …     → no release
 #
+# 1. plan:    a dry run works out the next version, or that there is none.
+# 2. build:   the binaries are built for every platform with that version.
+# 3. release: semantic-release writes CHANGELOG.md, stamps the version into
+#             Cargo.toml, Cargo.lock and npm/skillpouch, commits that as
+#             `chore(release): x.y.z [skip ci]`, tags `vx.y.z`, publishes the
+#             `@skillpouch/cli-<os>-<cpu>` packages and then `skillpouch` to
+#             npm, and creates the GitHub release with the binaries.
+#
+# The release job refuses a version other than the planned one, and does
+# nothing when main moved on in the meantime: the newer commit's run releases.
 # npm publishing uses trusted publishing (OIDC): no token is stored. Each
 # package on npmjs.com trusts this repository's `release.yml`.
 
 on:
-  push:
-    branches: [release]
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -21,28 +33,56 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  version:
+  plan:
     name: next version
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     outputs:
-      version: ${{ steps.next.outputs.version }}
+      version: ${{ steps.plan.outputs.version }}
+      sha: ${{ steps.plan.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
-      - id: next
-        run: echo "version=$(scripts/next-version.sh)" >> "$GITHUB_OUTPUT"
-      - run: echo "Releasing ${{ steps.next.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+      # semantic-release works on a branch; it stops by itself when the remote
+      # main has commits this one doesn't.
+      - run: git switch -C main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          npx semantic-release --dry-run
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [[ -f .release-version ]]; then
+            version=$(cat .release-version)
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            echo "Releasing **v$version**" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No release: no feat, fix or perf commits since the last one." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   build:
     name: build ${{ matrix.target }}
-    needs: version
+    needs: plan
+    if: needs.plan.outputs.version != ''
     strategy:
       fail-fast: true
       matrix:
@@ -55,18 +95,16 @@ jobs:
           - { target: aarch64-pc-windows-msvc, os: windows-latest }
     runs-on: ${{ matrix.os }}
     env:
-      VERSION: ${{ needs.version.outputs.version }}
+      VERSION: ${{ needs.plan.outputs.version }}
       # Static Linux builds: C code (ring, SQLite) goes through musl's gcc.
       CC_x86_64_unknown_linux_musl: musl-gcc
       CC_aarch64_unknown_linux_musl: musl-gcc
     steps:
       - uses: actions/checkout@v4
-      - name: Stamp the version
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - run: node scripts/release.mjs stamp "$VERSION"
         shell: bash
-        run: |
-          sed -i.bak "/^\[workspace.package\]/,/^\[/s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
-          rm Cargo.toml.bak
-          cargo update --workspace --offline || cargo update --workspace
       - run: rustup show active-toolchain || rustup toolchain install
       - run: rustup target add ${{ matrix.target }}
       - if: contains(matrix.target, 'musl')
@@ -76,7 +114,7 @@ jobs:
           key: ${{ matrix.target }}
       - name: Build
         shell: bash
-        run: cargo build --release --target ${{ matrix.target }} -p skillpouch
+        run: cargo build --release --locked --target ${{ matrix.target }} -p skillpouch
       - name: Check it runs
         if: "!startsWith(matrix.target, 'aarch64-pc-windows') && !(startsWith(matrix.target, 'x86_64-apple'))"
         shell: bash
@@ -97,52 +135,47 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  publish:
-    name: publish ${{ needs.version.outputs.version }}
-    needs: [version, build]
+  release:
+    name: release v${{ needs.plan.outputs.version }}
+    needs: [plan, build]
     runs-on: ubuntu-latest
-    env:
-      VERSION: ${{ needs.version.outputs.version }}
-      GH_TOKEN: ${{ github.token }}
     permissions:
       contents: write
       # Trusted publishing: npm trades this job's OIDC token for a publish token.
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          fetch-depth: 0
+      - run: git switch -C main
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
+          cache: npm
           registry-url: https://registry.npmjs.org
       # Trusted publishing needs npm 11.5.1 or later.
       - run: npm install -g npm@latest
+      - run: npm ci
       - uses: actions/download-artifact@v4
         with:
           path: binaries
           merge-multiple: true
-      - name: Package for npm
-        run: node scripts/npm-packages.mjs "$VERSION" binaries npm-out | tee packages.txt
-      - name: Publish the platform packages, then skillpouch
+      - name: Archive the binaries
         run: |
-          publish() {
-            local name=$1 dir=$2
-            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
-              echo "$name@$VERSION is already on npm"
-            else
-              (cd "$dir" && npm publish --access public)
-            fi
-          }
-          grep -v '^skillpouch	' packages.txt | while IFS=$'\t' read -r name dir; do publish "$name" "$dir"; done
-          publish skillpouch npm-out/skillpouch
-      - name: GitHub release
-        run: |
+          mkdir release-assets
           cd binaries
           for file in *; do
             case "$file" in
-              *.exe) zip -q "${file%.exe}.zip" "$file" ;;
-              *) tar -czf "$file.tar.gz" "$file" ;;
+              *.exe) zip -q "../release-assets/${file%.exe}.zip" "$file" ;;
+              *) chmod +x "$file" && tar -czf "../release-assets/$file.tar.gz" "$file" ;;
             esac
           done
-          sha256sum *.zip *.tar.gz > SHA256SUMS
-          gh release create "v$VERSION" *.zip *.tar.gz SHA256SUMS \
-            --target "$GITHUB_SHA" --title "v$VERSION" --generate-notes
+          cd ../release-assets
+          sha256sum * > SHA256SUMS
+      - name: Release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+          BINARIES: ${{ github.workspace }}/binaries
+        run: npx semantic-release

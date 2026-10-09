@@ -13,6 +13,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  commits:
+    name: commit messages · release scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # semantic-release reads these messages; see AGENTS.md.
+      - name: Commit messages follow Conventional Commits
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ -z "$BASE" || "$BASE" =~ ^0+$ ]] || ! git cat-file -e "$BASE" 2>/dev/null; then
+            npx commitlint --last --verbose
+          else
+            npx commitlint --from "$BASE" --to "$HEAD" --verbose
+          fi
+      - run: npm test
+
   lint:
     name: fmt · clippy
     runs-on: ubuntu-latest
