@@ -30,8 +30,55 @@ const LOCAL_CHECK: Duration = Duration::from_secs(2);
 const SETTLE: Duration = Duration::from_millis(500);
 /// A full sync at least this often, whatever happens.
 const FULL_SYNC: Duration = Duration::from_secs(5 * 60);
+/// How often the background sync looks for a new SkillPouch release (the
+/// registry itself is asked less often; see `update`).
+const UPDATE_CHECK: Duration = Duration::from_secs(30 * 60);
 /// The log is started over past this size.
 const LOG_MAX: u64 = 1024 * 1024;
+
+/// Which program runs the background sync, against which server: a
+/// command that finds it older, moved or pointed elsewhere restarts it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Identity {
+    pub pid: u32,
+    pub version: String,
+    pub exe: PathBuf,
+    pub api_url: String,
+}
+
+fn identity_path(ctx: &Context) -> PathBuf {
+    ctx.home.run_dir().join("daemon.json")
+}
+
+impl Identity {
+    fn ours(ctx: &Context) -> Option<Self> {
+        Some(Self {
+            pid: std::process::id(),
+            version: VERSION.to_string(),
+            exe: crate::update::exe()?,
+            api_url: ctx.client.base().to_string(),
+        })
+    }
+
+    pub fn load(ctx: &Context) -> Option<Self> {
+        let bytes = fs::read(identity_path(ctx)).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    /// This one should make way for one started by `ctx`'s program.
+    pub fn outdated(&self, ctx: &Context) -> bool {
+        self.api_url != ctx.client.base()
+            || crate::update::newer(VERSION, &self.version)
+            || !self.exe.exists()
+    }
+}
+
+/// A running background sync that should be replaced: older than this
+/// program, its program gone, or syncing with another server. One that
+/// doesn't say (from before it was recorded) counts as outdated too.
+pub fn outdated(ctx: &Context) -> bool {
+    running(ctx) && Identity::load(ctx).is_none_or(|identity| identity.outdated(ctx))
+}
 
 fn lock_path(ctx: &Context) -> PathBuf {
     ctx.home.run_dir().join("daemon.lock")
@@ -114,13 +161,32 @@ pub async fn run(ctx: &Context) -> Result<()> {
         );
     };
     let log = Log::new(ctx);
-    log.line(&format!("started (v{VERSION}, pid {})", std::process::id()));
+    log.line(&format!(
+        "started (v{VERSION}, pid {}, {})",
+        std::process::id(),
+        ctx.client.base()
+    ));
     set_pid(ctx, Some(std::process::id()));
+    if let Some(identity) = Identity::ours(ctx)
+        && let Ok(bytes) = serde_json::to_vec_pretty(&identity)
+    {
+        let _ = fs::write(identity_path(ctx), bytes);
+    }
     let stopped = wait_for_stop();
     tokio::pin!(stopped);
 
     let mut failures: u32 = 0;
+    let mut update_due = std::time::Instant::now();
     loop {
+        if std::time::Instant::now() >= update_due {
+            update_due = std::time::Instant::now() + UPDATE_CHECK;
+            if crate::update::in_background(ctx, &log).await {
+                set_pid(ctx, None);
+                let _ = fs::remove_file(identity_path(ctx));
+                drop(_lock);
+                return restart_updated(&log);
+            }
+        }
         let session = ctx.session();
         let mut waiting_on: Option<(Session, Report)> = None;
         let pause = match session {
@@ -176,8 +242,30 @@ pub async fn run(ctx: &Context) -> Result<()> {
         tokio::time::sleep(SETTLE).await;
     }
     set_pid(ctx, None);
+    let _ = fs::remove_file(identity_path(ctx));
     log.line("stopped");
     Ok(())
+}
+
+/// Carries on as the version just installed: same process (the service
+/// manager keeps track of it), new program.
+fn restart_updated(log: &Log) -> Result<()> {
+    let exe = crate::update::exe().context("couldn't find the skillpouch program")?;
+    let mut command = std::process::Command::new(&exe);
+    command.args(std::env::args_os().skip(1));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let error = command.exec();
+        log.line(&format!("couldn't start the new version: {error}"));
+        Err(error.into())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = log;
+        command.spawn()?;
+        Ok(())
+    }
 }
 
 fn backoff(failures: u32, base: u64, max: u64) -> Duration {
@@ -364,6 +452,8 @@ fn walk(path: &Path, deep: bool, hasher: &mut DefaultHasher, depth: usize) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Started {
     AlreadyRunning,
+    /// Run from a temporary download (`npx`): nothing may point at it.
+    Temporary,
     /// Installed as a user service: it also starts when you log in.
     Service,
     /// Started as a process of its own, until this computer restarts.
@@ -384,7 +474,13 @@ pub fn ensure_running(ctx: &Context) {
         .ok()
         .flatten()
         .is_some_and(|credentials| !SetupRecord::needed(&ctx.home, &credentials.device_id));
-    if set_up && !running(ctx) && !stopped_marker(ctx).exists() {
+    if !set_up || stopped_marker(ctx).exists() {
+        return;
+    }
+    if outdated(ctx) {
+        let _ = stop(ctx);
+    }
+    if !running(ctx) {
         let _ = start(ctx);
     }
 }
@@ -396,7 +492,10 @@ pub fn start(ctx: &Context) -> Result<Started> {
     if running(ctx) {
         return Ok(Started::AlreadyRunning);
     }
-    let exe = std::env::current_exe().context("couldn't find the skillpouch program")?;
+    let exe = crate::update::exe().context("couldn't find the skillpouch program")?;
+    if crate::update::temporary(&exe) {
+        return Ok(Started::Temporary);
+    }
     let installed = service::install(ctx, &exe).unwrap_or(false);
     if installed && service::STARTS_NOW {
         // Give the service a moment to take the lock.
@@ -417,7 +516,7 @@ pub fn start(ctx: &Context) -> Result<Started> {
 
 /// Starts `daemon run` as a process of its own, without a window.
 pub fn spawn_detached(ctx: &Context) -> Result<()> {
-    let exe = std::env::current_exe().context("couldn't find the skillpouch program")?;
+    let exe = crate::update::exe().context("couldn't find the skillpouch program")?;
     spawn(ctx, &exe)
 }
 
@@ -500,8 +599,9 @@ mod service {
     use std::path::Path;
     use std::process::{Command, Stdio};
 
-    /// Settings passed on so the service talks to the same server and folder.
-    const PASSED_ON: [&str; 3] = ["HOME", "SKILLPOUCH_HOME", "SKILLPOUCH_API_URL"];
+    /// Settings passed on so the service uses the same folder. The server
+    /// isn't: the service syncs with whichever one this computer logged in to.
+    const PASSED_ON: [&str; 2] = ["HOME", "SKILLPOUCH_HOME"];
 
     fn quiet(command: &mut Command) -> bool {
         command
@@ -635,9 +735,9 @@ mod service {
 
     /// The command Windows runs at login.
     #[cfg_attr(not(windows), allow(dead_code))]
-    pub fn login_command(exe: &Path, home: &Path, api_url: &str) -> String {
+    pub fn login_command(exe: &Path, home: &Path) -> String {
         format!(
-            "\"{}\" daemon run --background --home \"{}\" --api-url \"{api_url}\"",
+            "\"{}\" daemon run --background --home \"{}\"",
             exe.display(),
             home.display()
         )
@@ -646,7 +746,7 @@ mod service {
     #[cfg(windows)]
     pub fn install(ctx: &crate::context::Context, exe: &Path) -> Result<bool> {
         let _ = PASSED_ON;
-        let command = login_command(exe, ctx.home.root(), ctx.client.base());
+        let command = login_command(exe, ctx.home.root());
         Ok(quiet(Command::new("reg").args([
             "add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", &command, "/f",
         ])))
@@ -682,12 +782,50 @@ mod tests {
         let command = service::login_command(
             Path::new(r"C:\Users\Ada Lovelace\bin\skillpouch.exe"),
             Path::new(r"C:\Users\Ada Lovelace\.skillpouch"),
-            "https://skillpouch.net",
         );
         assert_eq!(
             command,
-            r#""C:\Users\Ada Lovelace\bin\skillpouch.exe" daemon run --background --home "C:\Users\Ada Lovelace\.skillpouch" --api-url "https://skillpouch.net""#
+            r#""C:\Users\Ada Lovelace\bin\skillpouch.exe" daemon run --background --home "C:\Users\Ada Lovelace\.skillpouch""#
         );
+    }
+
+    #[test]
+    fn an_older_moved_or_elsewhere_pointed_sync_makes_way() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let ctx = Context::load_with(
+            Some(dir.path().join(".skillpouch")),
+            Some("https://skillpouch.net".into()),
+        )?;
+        let exe = crate::update::exe().context("no exe")?;
+        let same = Identity {
+            pid: 1,
+            version: VERSION.into(),
+            exe: exe.clone(),
+            api_url: "https://skillpouch.net".into(),
+        };
+        assert!(!same.outdated(&ctx));
+        let newer = Identity {
+            version: "999.0.0".into(),
+            ..same.clone()
+        };
+        assert!(!newer.outdated(&ctx));
+        for other in [
+            Identity {
+                version: "0.0.1".into(),
+                ..same.clone()
+            },
+            Identity {
+                exe: dir.path().join("gone/skillpouch"),
+                ..same.clone()
+            },
+            Identity {
+                api_url: "http://localhost:5173".into(),
+                ..same.clone()
+            },
+        ] {
+            assert!(other.outdated(&ctx), "{other:?}");
+        }
+        Ok(())
     }
 
     #[test]

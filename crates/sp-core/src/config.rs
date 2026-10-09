@@ -16,6 +16,9 @@ pub struct Config {
     /// Name shown on the Devices page; defaults to the hostname.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_name: Option<String>,
+    /// `false` keeps SkillPouch from updating itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<bool>,
     /// What this computer syncs.
     #[serde(skip_serializing_if = "SyncChoice::is_everything")]
     pub sync: SyncChoice,
@@ -100,6 +103,7 @@ mod tests {
         let config = Config {
             api_url: Some("http://localhost:5173/".into()),
             device_name: Some("laptop".into()),
+            auto_update: Some(false),
             sync: SyncChoice {
                 skip_assistants: ["codex".to_string()].into(),
                 skip_kinds: ["hook".to_string()].into(),

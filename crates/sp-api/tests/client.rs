@@ -256,3 +256,23 @@ async fn reports_usage_and_reads_the_sum() -> Result<(), Box<dyn std::error::Err
     assert_eq!(summary.all_time.output, 2);
     Ok(())
 }
+
+#[tokio::test]
+async fn asks_npm_for_the_latest_version() -> Result<(), Box<dyn std::error::Error>> {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/skillpouch/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "name": "skillpouch", "version": "0.4.2" })),
+        )
+        .mount(&server)
+        .await;
+    let client = client(&server)?;
+    assert_eq!(
+        client.npm_latest(&server.uri(), "skillpouch").await?,
+        "0.4.2"
+    );
+    assert!(client.npm_latest(&server.uri(), "missing").await.is_err());
+    Ok(())
+}

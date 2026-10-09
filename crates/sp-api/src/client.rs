@@ -62,6 +62,31 @@ impl Client {
         &self.base
     }
 
+    /// The version `npm install -g <package>` installs now. Asked from the
+    /// registry itself: it is what the install reads, whatever server this
+    /// computer uses.
+    pub async fn npm_latest(&self, registry: &str, package: &str) -> Result<String> {
+        #[derive(serde::Deserialize)]
+        struct Latest {
+            version: String,
+        }
+        let url = format!("{}/{package}/latest", registry.trim_end_matches('/'));
+        let response = self
+            .http
+            .get(url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(ApiError::Unexpected {
+                status: response.status().as_u16(),
+                message: "from the npm registry".into(),
+            });
+        }
+        let latest: Latest = response.json().await?;
+        Ok(latest.version)
+    }
+
     /// Opens a login request; the proof must be signed by `body.sign_pub`'s key.
     pub async fn create_login(
         &self,

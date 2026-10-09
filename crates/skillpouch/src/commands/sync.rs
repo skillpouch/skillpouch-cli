@@ -78,6 +78,13 @@ pub async fn run_daemon(ctx: &Context, background: bool) -> Result<ExitCode> {
 pub fn start(ctx: &Context) -> Result<ExitCode> {
     match daemon::start(ctx)? {
         Started::AlreadyRunning => ui::success("Background sync is already running."),
+        Started::Temporary => {
+            ui::warn(
+                "This copy of SkillPouch is a temporary download, so it can't sync in the background.",
+            );
+            ui::hint("Install it with `npm i -g skillpouch`, then run `skillpouch daemon start`.");
+            return Ok(ExitCode::from(1));
+        }
         Started::Service => {
             ui::success("Background sync started. It starts again when you log in.");
         }

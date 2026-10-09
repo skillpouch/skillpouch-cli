@@ -63,6 +63,12 @@ pub async fn run(ctx: Context) -> Result<ExitCode> {
     drop(requests);
     let _ = tokio::time::timeout(CANCEL_GRACE, worker).await;
     shown?;
+    if crate::update::exe().is_some_and(|exe| crate::update::temporary(&exe)) {
+        crate::ui::warn(
+            "This is a temporary copy of SkillPouch (from npx), so nothing syncs in the background.",
+        );
+        crate::ui::hint("Install it to keep this computer in sync: `npm i -g skillpouch`.");
+    }
     Ok(ExitCode::SUCCESS)
 }
 

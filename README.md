@@ -12,7 +12,7 @@ The `skillpouch` command-line tool and background sync daemon.
 | `crates/sp-sync/` | The sync engine: the pouch as plain files in `~/.skillpouch/pouches/<id>/`, three-way compare with the server, encrypted commits, links into each assistant, and MCP servers, hooks and plugins in their configs. |
 | `crates/sp-tui/` | The terminal UI (ratatui): overview with the animated mascot, pouches (pick the one this computer syncs), token usage, computers, account. |
 | `crates/sp-usage/` | Token counts per day and model from Claude Code, Codex and OpenCode logs. Only counts leave the computer. |
-| `npm/skillpouch/` | The npm package `skillpouch` (`npx skillpouch …`): a launcher that runs the native binary from `@skillpouch/cli-<os>-<cpu>`. |
+| `npm/skillpouch/` | The npm package `skillpouch` (`npm i -g skillpouch`): a launcher that runs the native binary from `@skillpouch/cli-<os>-<cpu>`. |
 | `scripts/` | `release.mjs` (the steps semantic-release runs: verify, stamp, publish) and `npm-packages.mjs` (the platform packages of a release), with tests (`npm test`). |
 
 Server, web app and API contracts live in the separate `skillpouch` repository.
@@ -90,6 +90,18 @@ the pouch, a badge on its card) until it's dealt with. Commands are for looking
 - `skillpouch select` turns assistants and kinds off per computer; `skillpouch
   unlink` stops syncing one assistant or the whole computer. Either way the links
   become real files, so the assistants keep working without SkillPouch.
+
+### Staying up to date
+
+Install it globally (`npm i -g skillpouch`, `pnpm add -g skillpouch` or
+`bun add -g skillpouch`) and it updates itself with the same package manager:
+before a command run at the terminal and in the background sync, asking the
+npm registry at most every six hours. A background sync left by an older
+version, a moved program or another server is restarted by the next command.
+On Windows a running program can't be replaced, so it says when an update is
+out instead. `auto_update = false` in `~/.skillpouch/config.toml` or
+`SKILLPOUCH_NO_UPDATE=1` turns it off. A one-off `npx skillpouch` works, but
+can't sync in the background: npm's cache, where it runs from, is temporary.
 
 Exit codes: `0` ok, `1` error, `2` usage, `3` not logged in, `130` cancelled.
 

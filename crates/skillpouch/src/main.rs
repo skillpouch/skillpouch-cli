@@ -10,6 +10,7 @@ mod notify;
 mod setup;
 mod sync;
 mod ui;
+mod update;
 mod usage;
 mod when;
 
@@ -17,6 +18,8 @@ use clap::Parser;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    // Before anything can replace it.
+    let _ = update::exe();
     let cli = cli::Cli::parse();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()

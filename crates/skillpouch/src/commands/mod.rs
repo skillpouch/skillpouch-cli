@@ -21,9 +21,15 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
     let ctx = match &cli.command {
         Some(Command::Daemon {
             action: DaemonAction::Run { home, api_url, .. },
-        }) => Context::load_with(home.clone(), api_url.clone())?,
+        }) => daemon_context(home.clone(), api_url.clone())?,
         _ => Context::load()?,
     };
+    if updates(cli.command.as_ref())
+        && interactive()
+        && let Some(code) = crate::update::before_command(&ctx).await
+    {
+        return Ok(code);
+    }
     // Syncing runs on its own: whatever is run, a set-up computer whose
     // background sync stopped (a restart without a service) gets it back.
     let heals = !matches!(
@@ -46,6 +52,10 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
             no_browser,
         } => {
             let code = login::run(&ctx, token, name, no_browser).await?;
+            if code == ExitCode::SUCCESS {
+                // It syncs for the login just replaced; setting up starts a new one.
+                let _ = crate::daemon::stop(&ctx);
+            }
             // Straight on to setting this computer up; then it runs on its own.
             if code == ExitCode::SUCCESS && interactive() {
                 return tui::run(Context::load()?).await;
@@ -64,5 +74,29 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
             DaemonAction::Status => sync::status(&ctx),
             DaemonAction::Run { background, .. } => sync::run_daemon(&ctx, background).await,
         },
+    }
+}
+
+/// Commands that update SkillPouch first when a newer release is out.
+fn updates(command: Option<&Command>) -> bool {
+    !matches!(
+        command,
+        Some(Command::Daemon { .. } | Command::Logout | Command::Unlink { .. })
+    ) && !matches!(command, Some(Command::Status { json: true }))
+}
+
+/// The background sync talks to the server this computer logged in to,
+/// unless told otherwise: a service set up for one server keeps working
+/// after logging in to another.
+fn daemon_context(home: Option<std::path::PathBuf>, api_url: Option<String>) -> Result<Context> {
+    let ctx = Context::load_with(home.clone(), api_url.clone())?;
+    if api_url.is_some() {
+        return Ok(ctx);
+    }
+    match sp_core::Credentials::load(&ctx.home) {
+        Ok(Some(saved)) if saved.api_url != ctx.client.base() => {
+            Context::load_with(home, Some(saved.api_url))
+        }
+        _ => Ok(ctx),
     }
 }
