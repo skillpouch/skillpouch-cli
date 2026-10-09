@@ -8,7 +8,7 @@ pub mod credentials;
 pub mod home;
 pub mod setup;
 
-pub use config::Config;
+pub use config::{Config, SyncChoice};
 pub use credentials::Credentials;
 pub use home::Home;
 

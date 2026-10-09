@@ -37,6 +37,27 @@ fn yaml_value(raw: &str) -> String {
     raw.trim_matches(['"', '\'']).to_string()
 }
 
+/// `text` as a YAML value: plain when that reads back the same, else quoted.
+pub(crate) fn yaml_scalar(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text.trim() == text
+        && !text.contains(": ")
+        && !text.contains(" #")
+        && !text.ends_with(':')
+        && !text.contains(['\n', '"'])
+        && !text.starts_with(|c: char| "!&*-?|>'%@`{}[],#\"".contains(c))
+        && !matches!(
+            text.to_lowercase().as_str(),
+            "true" | "false" | "null" | "yes" | "no" | "~"
+        )
+        && text.parse::<f64>().is_err();
+    if plain {
+        text.to_string()
+    } else {
+        serde_json::to_string(text).unwrap_or_default()
+    }
+}
+
 fn description_of(lines: &[&str]) -> Option<String> {
     lines
         .iter()
@@ -69,8 +90,14 @@ pub fn from_toml(text: &str, current: &str) -> Option<String> {
         .and_then(toml::Value::as_str)
         .filter(|text| !text.is_empty());
     let (front, _) = split(current);
+    let front = front.unwrap_or_default();
+    // The same description keeps its line as written.
+    let kept = front
+        .iter()
+        .find(|line| line.starts_with("description:"))
+        .filter(|line| description.is_some_and(|d| yaml_value(&line["description:".len()..]) == d))
+        .map(|line| line.to_string());
     let mut lines: Vec<String> = front
-        .unwrap_or_default()
         .into_iter()
         .filter(|line| !line.starts_with("description:"))
         .map(str::to_string)
@@ -78,10 +105,7 @@ pub fn from_toml(text: &str, current: &str) -> Option<String> {
     if let Some(description) = description {
         lines.insert(
             0,
-            format!(
-                "description: {}",
-                serde_json::to_string(description).unwrap_or_default()
-            ),
+            kept.unwrap_or_else(|| format!("description: {}", yaml_scalar(description))),
         );
     }
     let mut out = String::new();
@@ -100,6 +124,19 @@ pub fn from_toml(text: &str, current: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toml_round_trips_to_the_same_markdown() {
+        for md in [
+            "---\ndescription: Ship it\n---\n\nShip $ARGUMENTS\n",
+            "---\ndescription: \"Fix: the bug\"\n---\n\nFix\n",
+        ] {
+            assert_eq!(from_toml(&to_toml(md), "").as_deref(), Some(md), "{md}");
+            assert_eq!(from_toml(&to_toml(md), md).as_deref(), Some(md), "{md}");
+        }
+        assert_eq!(yaml_scalar("yes"), "\"yes\"");
+        assert_eq!(yaml_scalar("Review the diff"), "Review the diff");
+    }
 
     #[test]
     fn markdown_becomes_toml_with_gemini_arguments() {
@@ -121,7 +158,7 @@ mod tests {
         let back = from_toml(edited, md).unwrap_or_default();
         assert_eq!(
             back,
-            "---\ndescription: \"new one\"\nmodel: x\n---\n\nNew $ARGUMENTS\n"
+            "---\ndescription: new one\nmodel: x\n---\n\nNew $ARGUMENTS\n"
         );
         // And round-trips to the same TOML.
         assert_eq!(

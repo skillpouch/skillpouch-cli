@@ -145,7 +145,7 @@ pub fn pouch_dir(ctx: &Context, pouch_id: &str) -> PathBuf {
     ctx.home.root().join("pouches").join(pouch_id)
 }
 
-fn places(ctx: &Context) -> Result<Places> {
+pub fn places(ctx: &Context) -> Result<Places> {
     let home = user_home().context("couldn't find your home folder")?;
     Ok(Places::of(&home, ctx.home.root()))
 }
@@ -163,6 +163,14 @@ fn backups_dir(ctx: &Context) -> PathBuf {
 pub async fn run(ctx: &Context, session: &mut Session) -> Result<Report> {
     let record = SetupRecord::load(&ctx.home)?
         .filter(|record| record.device_id == session.credentials.device_id)
+        .ok_or(Stopped::NotSetUp)?;
+    let lock = crate::choose::sync_lock(ctx);
+    let _lock = tokio::task::spawn_blocking(move || sp_core::home::lock_exclusive(&lock))
+        .await
+        .context("couldn't wait for another sync")??;
+    // Unlinked while waiting for the lock.
+    let record = SetupRecord::load(&ctx.home)?
+        .filter(|saved| saved.device_id == record.device_id)
         .ok_or(Stopped::NotSetUp)?;
     mark(ctx, Phase::Syncing, Some(&record.pouch_id), None);
     let result = run_with(ctx, session, record).await;
@@ -267,13 +275,28 @@ async fn run_with(ctx: &Context, session: &mut Session, mut record: SetupRecord)
         ..Report::default()
     };
 
-    let (harnesses, targets) = {
+    let (harnesses, all_targets) = {
         let places = places.clone();
         tokio::task::spawn_blocking(move || {
             (sp_harness::discover(&places), sp_harness::targets(&places))
         })
         .await?
     };
+    // What this computer syncs (read each time: `skillpouch select` and the
+    // TUI change it while the background sync runs).
+    let choice = sp_core::Config::load(&ctx.home)
+        .map(|config| config.sync)
+        .unwrap_or_default();
+    release_unchosen(&ctx.home, &mut projection, &all_targets, &choice)?;
+    let targets: Vec<Target> = all_targets
+        .into_iter()
+        .filter(|target| choice.assistant_on(target.id))
+        .collect();
+    let harnesses: Vec<Harness> = harnesses
+        .into_iter()
+        .filter(|harness| choice.assistant_on(harness.id))
+        .map(|harness| chosen_items(harness, &choice))
+        .collect();
     if record.done {
         follow_assistants(
             &ctx.home,
@@ -284,7 +307,7 @@ async fn run_with(ctx: &Context, session: &mut Session, mut record: SetupRecord)
             &mut report,
         )?;
     }
-    let options = if record.done {
+    let mut options = if record.done {
         bring_in_new(
             &dir,
             &harnesses,
@@ -305,8 +328,26 @@ async fn run_with(ctx: &Context, session: &mut Session, mut record: SetupRecord)
             &mut report,
         )?
     };
+    if !choice.skip_kinds.is_empty() {
+        // Kinds left out here aren't on this computer: not a reason to
+        // delete them from the pouch.
+        options.delete_unmatched = false;
+    }
     let claude_plugins = plugins::known_marketplaces(&places.claude);
-    bring_in_hooks_and_plugins(&dir, &targets, &mut projection, &claude_plugins)?;
+    let config_targets: Vec<Target> = targets
+        .iter()
+        .cloned()
+        .map(|mut target| {
+            if !choice.kind_on("hook") {
+                target.hooks = None;
+            }
+            if !choice.kind_on("plugin") {
+                target.plugins = None;
+            }
+            target
+        })
+        .collect();
+    bring_in_hooks_and_plugins(&dir, &config_targets, &mut projection, &claude_plugins)?;
 
     let mut state = PouchState::load(&ctx.home, &record.pouch_id)?;
     if state.epoch != remote.pouch.epoch && !state.epoch.is_empty() {
@@ -354,7 +395,8 @@ async fn run_with(ctx: &Context, session: &mut Session, mut record: SetupRecord)
         }
     }
 
-    let (items, _) = dir.read()?;
+    let (mut items, _) = dir.read()?;
+    items.retain(|_, item| choice.kind_on(&item.kind));
     let (next, projected) = project::project(&ctx.home, &items, &targets, &backups, &projection)?;
     projection.links = next.links;
     projection.mcp = next.mcp;
@@ -375,6 +417,41 @@ async fn run_with(ctx: &Context, session: &mut Session, mut record: SetupRecord)
     // Only for the web's device list; a failure here doesn't matter.
     let _ = remote.acknowledge(state.cursor).await;
     Ok(report)
+}
+
+/// Hands back to the assistants what this computer no longer syncs: the
+/// assistants turned off here, and the kinds turned off.
+pub fn release_unchosen(
+    home: &sp_core::Home,
+    projection: &mut Projection,
+    targets: &[Target],
+    choice: &sp_core::SyncChoice,
+) -> Result<sp_sync::release::Released> {
+    Ok(sp_sync::release::release(
+        home,
+        projection,
+        targets,
+        &|owner, kind| owner.is_some_and(|id| !choice.assistant_on(id)) || !choice.kind_on(kind),
+    )?)
+}
+
+/// Leaves out of `harness` the kinds this computer doesn't sync.
+fn chosen_items(mut harness: Harness, choice: &sp_core::SyncChoice) -> Harness {
+    harness
+        .items
+        .retain(|item| choice.kind_on(kind_name(item.kind)));
+    harness
+}
+
+/// The pouch's name for a kind found in an assistant.
+pub fn kind_name(kind: sp_harness::Kind) -> &'static str {
+    match kind {
+        sp_harness::Kind::Instructions => "instructions",
+        sp_harness::Kind::Skill => "skill",
+        sp_harness::Kind::Agent => "agent",
+        sp_harness::Kind::Command => "command",
+        sp_harness::Kind::McpServer => "mcp_server",
+    }
 }
 
 /// The first sync, as chosen at setup.

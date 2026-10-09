@@ -1,4 +1,5 @@
 mod browser;
+mod choose;
 mod cli;
 mod commands;
 mod context;

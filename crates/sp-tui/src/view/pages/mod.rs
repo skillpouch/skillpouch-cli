@@ -1,13 +1,15 @@
-//! The five tabs. Plain text and tables, no boxes: headings, label columns
+//! The six tabs. Plain text and tables, no boxes: headings, label columns
 //! and a highlighted row are enough.
 
 mod account;
+mod choice;
 mod computers;
 mod overview;
 mod pouches;
 mod usage;
 
 pub use account::account;
+pub use choice::choice;
 pub use computers::computers;
 pub use overview::overview;
 pub use pouches::pouches;

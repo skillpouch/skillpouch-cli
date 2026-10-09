@@ -18,6 +18,7 @@ pub mod mcp;
 pub mod noticed;
 pub mod plugins;
 pub mod project;
+pub mod release;
 pub mod remote;
 pub mod state;
 pub mod status;

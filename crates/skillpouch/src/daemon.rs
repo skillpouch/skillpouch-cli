@@ -264,6 +264,8 @@ pub fn local_signature(ctx: &Context) -> u64 {
     add(&ctx.home.root().join("pouches"), true);
     add(&ctx.home.state_dir().join("setup.json"), false);
     add(&ctx.home.credentials_file(), false);
+    // `skillpouch select` and the TUI's Sync tab.
+    add(&ctx.home.config_file(), false);
     if let Some(home) = user_home() {
         let places = Places::of(&home, ctx.home.root());
         for target in sp_harness::targets(&places) {

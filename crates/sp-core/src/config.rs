@@ -3,6 +3,7 @@
 use crate::home::{read_optional, write_private};
 use crate::{CoreError, Home, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 pub const DEFAULT_API_URL: &str = "https://skillpouch.net";
 
@@ -15,6 +16,36 @@ pub struct Config {
     /// Name shown on the Devices page; defaults to the hostname.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_name: Option<String>,
+    /// What this computer syncs.
+    #[serde(skip_serializing_if = "SyncChoice::is_everything")]
+    pub sync: SyncChoice,
+}
+
+/// What this computer syncs: everything, except the assistants and kinds
+/// turned off here. Other computers choose for themselves.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SyncChoice {
+    /// Assistant ids (`codex`) this computer leaves alone.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub skip_assistants: BTreeSet<String>,
+    /// Kinds (`hook`, `mcp_server`) this computer doesn't put into assistants.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub skip_kinds: BTreeSet<String>,
+}
+
+impl SyncChoice {
+    pub fn is_everything(&self) -> bool {
+        self.skip_assistants.is_empty() && self.skip_kinds.is_empty()
+    }
+
+    pub fn assistant_on(&self, id: &str) -> bool {
+        !self.skip_assistants.contains(id)
+    }
+
+    pub fn kind_on(&self, kind: &str) -> bool {
+        !self.skip_kinds.contains(kind)
+    }
 }
 
 impl Config {
@@ -69,9 +100,16 @@ mod tests {
         let config = Config {
             api_url: Some("http://localhost:5173/".into()),
             device_name: Some("laptop".into()),
+            sync: SyncChoice {
+                skip_assistants: ["codex".to_string()].into(),
+                skip_kinds: ["hook".to_string()].into(),
+            },
         };
         config.save(&home)?;
         assert_eq!(Config::load(&home)?, config);
+        assert!(!config.sync.assistant_on("codex") && config.sync.kind_on("skill"));
+        let text = std::fs::read_to_string(home.config_file()).unwrap_or_default();
+        assert!(text.contains("[sync]"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

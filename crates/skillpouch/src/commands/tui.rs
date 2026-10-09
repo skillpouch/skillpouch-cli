@@ -142,6 +142,32 @@ async fn serve(
                 // Either way the server has the last word.
                 let _ = updates.send(load(&ctx, &reported).await);
             }
+            Request::Choose { assistant, id, on } => {
+                let choice = if assistant {
+                    crate::choose::parse(&id)
+                        .filter(|c| matches!(c, crate::choose::Choice::Assistant(_)))
+                } else {
+                    crate::choose::parse(&id)
+                };
+                let result = match choice {
+                    Some(choice) if on => crate::choose::set(&ctx, &[choice], &[]),
+                    Some(choice) => crate::choose::set(&ctx, &[], &[choice]),
+                    None => Err(anyhow::anyhow!("unknown: {id}")),
+                };
+                if let Err(error) = result {
+                    let _ = updates.send(Update::Notice(Notice::error(message(&error))));
+                }
+            }
+            Request::Unlink => {
+                let notice = match crate::choose::unlink_all(&ctx) {
+                    Ok(_) => Notice::success(
+                        "Unlinked: SkillPouch no longer syncs this computer. Every file stays.",
+                    ),
+                    Err(error) => Notice::error(message(&error)),
+                };
+                let _ = updates.send(Update::Notice(notice));
+                let _ = updates.send(Update::Sync(None));
+            }
             Request::Setup => {
                 let (ctx, updates) = (Arc::clone(&ctx), updates.clone());
                 tokio::spawn(async move {
@@ -367,6 +393,7 @@ async fn fetch(ctx: &Context, reported: &Reported) -> Result<Dashboard> {
         OffsetDateTime::now_utc(),
     );
     dashboard.sync = sync_view(ctx);
+    dashboard.choice = choice_view(ctx);
     Ok(dashboard)
 }
 
@@ -477,6 +504,38 @@ fn dashboard(answers: Answers, now: OffsetDateTime) -> Dashboard {
         usage,
         first_sync,
         sync: None,
+        choice: sp_tui::ChoiceView::default(),
+    }
+}
+
+/// The Sync tab: the assistants found here and the kinds, on or off.
+fn choice_view(ctx: &Context) -> sp_tui::ChoiceView {
+    let choice = crate::choose::current(ctx);
+    let targets = crate::sync::places(ctx)
+        .map(|places| sp_harness::targets(&places))
+        .unwrap_or_default();
+    sp_tui::ChoiceView {
+        assistants: targets
+            .iter()
+            .map(|target| sp_tui::ChoiceRow {
+                id: target.id.to_string(),
+                name: target.name.to_string(),
+                on: choice.assistant_on(target.id),
+                note: target
+                    .read_only
+                    .as_ref()
+                    .map(|_| "only read: part of a git checkout".to_string()),
+            })
+            .collect(),
+        kinds: crate::choose::KINDS
+            .iter()
+            .map(|(kind, label)| sp_tui::ChoiceRow {
+                id: kind.to_string(),
+                name: label.to_string(),
+                on: choice.kind_on(kind),
+                note: None,
+            })
+            .collect(),
     }
 }
 

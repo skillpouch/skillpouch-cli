@@ -86,6 +86,26 @@ pub struct Dashboard {
     pub first_sync: Option<String>,
     /// How syncing this computer is going; `None` before it is set up.
     pub sync: Option<SyncView>,
+    /// What this computer syncs.
+    pub choice: ChoiceView,
+}
+
+/// What this computer syncs, for the Sync tab.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChoiceView {
+    /// The assistants found here.
+    pub assistants: Vec<ChoiceRow>,
+    /// Skills, agents, MCP servers…
+    pub kinds: Vec<ChoiceRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceRow {
+    pub id: String,
+    pub name: String,
+    pub on: bool,
+    /// `only read: part of a git checkout`.
+    pub note: Option<String>,
 }
 
 /// One line about syncing, and maybe a second that explains it.
@@ -135,6 +155,14 @@ pub enum Request {
     Login,
     CancelLogin,
     Logout,
+    /// Turn an assistant (or, with `assistant: false`, a kind) on or off here.
+    Choose {
+        assistant: bool,
+        id: String,
+        on: bool,
+    },
+    /// Stop syncing this computer; every file stays as a real file.
+    Unlink,
     /// Make this pouch the one this computer syncs.
     UsePouch(String),
     /// Open a web app path (`/app/account`) in the browser.

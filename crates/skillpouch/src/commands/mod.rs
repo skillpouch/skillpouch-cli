@@ -1,6 +1,7 @@
 mod home;
 mod login;
 mod logout;
+mod select;
 mod status;
 mod sync;
 mod tui;
@@ -25,6 +26,8 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
             name,
             no_browser,
         } => login::run(&ctx, token, name, no_browser).await,
+        Command::Select { on, off } => select::select(&ctx, &on, &off),
+        Command::Unlink { assistant } => select::unlink(&ctx, assistant.as_deref()),
         Command::Logout => logout::run(&ctx).await,
         Command::Status { json } => status::run(&ctx, json).await,
         Command::Sync => sync::once(&ctx).await,

@@ -910,7 +910,7 @@ mod tests {
         let main = pouch.join("commands/review/COMMAND.md");
         assert_eq!(
             fs::read_to_string(&main).map_err(io(&main))?,
-            "---\ndescription: \"Review\"\n---\n\nCheck $ARGUMENTS closely\n"
+            "---\ndescription: Review\n---\n\nCheck $ARGUMENTS closely\n"
         );
 
         // The command leaves the pouch: our untouched copy goes too.

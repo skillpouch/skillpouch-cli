@@ -291,6 +291,15 @@ struct Layout {
 
 /// In the order skills are linked: Claude Code's and Codex's folders are
 /// the ones others share.
+/// Every assistant SkillPouch knows, as `(id, name)`.
+pub fn known() -> Vec<(&'static str, &'static str)> {
+    let root = Path::new("/");
+    layouts(&Places::plain(root, root))
+        .into_iter()
+        .map(|layout| (layout.id, layout.name))
+        .collect()
+}
+
 fn layouts(places: &Places) -> Vec<Layout> {
     let claude_skills = places.claude.join("skills");
     let shared_skills = places.agents.join("skills");

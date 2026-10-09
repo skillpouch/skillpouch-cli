@@ -52,11 +52,15 @@ pub fn draw(app: &App, frame: &mut Frame) {
         Tab::Pouches => pages::pouches(app, frame, body),
         Tab::Usage => pages::usage(app, frame, body),
         Tab::Computers => pages::computers(app, frame, body),
+        Tab::Sync => pages::choice(app, frame, body),
         Tab::Account => pages::account(app, frame, body),
     }
     draw_footer(app, frame, footer);
     if app.confirm_logout {
         draw_logout(frame, area);
+    }
+    if app.confirm_unlink {
+        draw_unlink(frame, area);
     }
 }
 
@@ -134,6 +138,7 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
     }
     match app.tab {
         Tab::Pouches => pairs.push(("enter", "sync here")),
+        Tab::Sync => pairs.push(("enter", "on / off")),
         Tab::Account => pairs.push(("enter", "select")),
         _ => {}
     }
@@ -189,6 +194,30 @@ fn draw_logout(frame: &mut Frame, area: Rect) {
         ),
         Line::default(),
         keys(&[("y", "log out"), ("n", "cancel")]),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
+        rect,
+    );
+}
+
+fn draw_unlink(frame: &mut Frame, area: Rect) {
+    let rect = centered(area, 64, 8);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme::BORDER_STRONG))
+        .padding(Padding::new(2, 2, 1, 0));
+    let lines = vec![
+        Line::styled("Unlink this computer?", theme::strong()),
+        Line::styled(
+            "SkillPouch stops syncing here. Every file stays, as a real file.",
+            theme::meta(),
+        ),
+        Line::default(),
+        keys(&[("y", "unlink"), ("n", "cancel")]),
     ];
     frame.render_widget(
         Paragraph::new(lines)
@@ -288,7 +317,7 @@ pub(crate) mod tests {
     #[test]
     fn every_tab_draws() {
         let mut app = ready();
-        let expected: [&[&str]; 5] = [
+        let expected: [&[&str]; 6] = [
             &[
                 "Hi, Ada",
                 "Work stuff",
@@ -316,6 +345,14 @@ pub(crate) mod tests {
                 "claude-sonnet",
                 "This month by assistant",
                 "3.8K output",
+            ],
+            &[
+                "Assistant",
+                "Claude Code",
+                "only read: part of a git checkout",
+                "Synced into them",
+                "● on",
+                "Hooks",
             ],
             &[
                 "desktop",

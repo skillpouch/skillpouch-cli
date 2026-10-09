@@ -16,15 +16,17 @@ pub enum Tab {
     Overview,
     Pouches,
     Usage,
+    Sync,
     Computers,
     Account,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [
+    pub const ALL: [Tab; 6] = [
         Self::Overview,
         Self::Pouches,
         Self::Usage,
+        Self::Sync,
         Self::Computers,
         Self::Account,
     ];
@@ -34,6 +36,7 @@ impl Tab {
             Self::Overview => "Overview",
             Self::Pouches => "Pouches",
             Self::Usage => "Usage",
+            Self::Sync => "Sync",
             Self::Computers => "Computers",
             Self::Account => "Account",
         }
@@ -67,15 +70,17 @@ pub enum AccountAction {
     OpenAccount,
     OpenBilling,
     Relogin,
+    Unlink,
     Logout,
 }
 
 impl AccountAction {
-    pub const ALL: [AccountAction; 5] = [
+    pub const ALL: [AccountAction; 6] = [
         Self::SetUp,
         Self::OpenAccount,
         Self::OpenBilling,
         Self::Relogin,
+        Self::Unlink,
         Self::Logout,
     ];
 
@@ -85,6 +90,7 @@ impl AccountAction {
             Self::OpenAccount => "Open your account",
             Self::OpenBilling => "Manage plan and billing",
             Self::Relogin => "Log in again with new keys",
+            Self::Unlink => "Unlink this computer",
             Self::Logout => "Log out",
         }
     }
@@ -95,6 +101,7 @@ impl AccountAction {
             Self::OpenAccount => "Profile, sign-in and security, in the browser",
             Self::OpenBilling => "Change or cancel your plan, in the browser",
             Self::Relogin => "Replaces this computer's keys once you approve",
+            Self::Unlink => "Stops syncing here; every file stays, as a real file",
             Self::Logout => "Deletes this computer's keys",
         }
     }
@@ -113,13 +120,15 @@ pub struct App {
     /// Asked the server again; the current dashboard stays until it answers.
     pub refreshing: bool,
     pub tab: Tab,
-    cursors: [usize; 5],
+    cursors: [usize; 6],
     /// The login screen is up.
     pub login: Option<Login>,
     /// Setting up what this computer syncs.
     pub setup: Option<Setup>,
     /// Asking before logging out.
     pub confirm_logout: bool,
+    /// Asking before unlinking this computer.
+    pub confirm_unlink: bool,
     notice: Option<(Notice, Instant)>,
     pub tick: usize,
 }
@@ -135,10 +144,11 @@ impl App {
             },
             refreshing: false,
             tab: Tab::Overview,
-            cursors: [0; 5],
+            cursors: [0; 6],
             login: (!signed_in).then(Login::idle),
             setup: None,
             confirm_logout: false,
+            confirm_unlink: false,
             notice: None,
             tick: 0,
         }
@@ -179,6 +189,9 @@ impl App {
             Tab::Overview | Tab::Usage => 0,
             Tab::Pouches => self.dashboard().map_or(0, |d| d.pouches.len()),
             Tab::Computers => self.dashboard().map_or(0, |d| d.computers.len()),
+            Tab::Sync => self
+                .dashboard()
+                .map_or(0, |d| d.choice.assistants.len() + d.choice.kinds.len()),
             Tab::Account => AccountAction::ALL.len(),
         }
     }
@@ -294,6 +307,7 @@ impl App {
                 .dashboard()
                 .and_then(|d| d.pouches.get(self.cursor(Tab::Pouches)))
                 .map_or("/app".into(), |pouch| format!("/app/p/{}", pouch.id)),
+            Tab::Sync => "/app".into(),
             Tab::Computers => "/app/account/devices".into(),
             Tab::Account => "/app/account".into(),
         }
@@ -314,6 +328,13 @@ impl App {
         }
         if self.confirm_logout {
             return self.on_logout_key(key.code);
+        }
+        if self.confirm_unlink {
+            self.confirm_unlink = false;
+            return match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => Outcome::Send(Request::Unlink),
+                _ => Outcome::Nothing,
+            };
         }
         self.on_dashboard_key(key.code)
     }
@@ -378,7 +399,7 @@ impl App {
         let count = Tab::ALL.len();
         match code {
             KeyCode::Char('q') | KeyCode::Esc => Outcome::Quit,
-            KeyCode::Char(digit @ '1'..='5') => {
+            KeyCode::Char(digit @ '1'..='6') => {
                 self.tab = Tab::ALL[usize::from(digit as u8 - b'1')];
                 Outcome::Nothing
             }
@@ -409,6 +430,7 @@ impl App {
                 Outcome::Send(Request::Refresh)
             }
             KeyCode::Char('o') => self.open(&self.web_path()),
+            KeyCode::Enter | KeyCode::Char(' ') if self.tab == Tab::Sync => self.toggle_choice(),
             KeyCode::Enter if self.tab == Tab::Pouches => self.use_selected_pouch(),
             KeyCode::Enter if self.tab == Tab::Account => {
                 match AccountAction::ALL.get(self.cursor(Tab::Account)) {
@@ -417,6 +439,10 @@ impl App {
                     Some(AccountAction::OpenBilling) => self.open("/app/account/billing"),
                     Some(AccountAction::Relogin) => {
                         self.login = Some(Login::idle());
+                        Outcome::Nothing
+                    }
+                    Some(AccountAction::Unlink) => {
+                        self.confirm_unlink = true;
                         Outcome::Nothing
                     }
                     Some(AccountAction::Logout) => {
@@ -434,6 +460,45 @@ impl App {
 impl App {
     /// Makes the selected pouch the one this computer syncs. The dashboard
     /// shows it right away; the next load confirms it.
+    /// Flips the selected assistant or kind on the Sync tab (shown at once;
+    /// the CLI saves it and hands items back to the assistant).
+    fn toggle_choice(&mut self) -> Outcome {
+        let cursor = self.cursor(Tab::Sync);
+        let Status::Ready(dashboard) = &mut self.status else {
+            return Outcome::Nothing;
+        };
+        let choice = &mut dashboard.choice;
+        let assistant = cursor < choice.assistants.len();
+        let last_kind = choice.kinds.iter().filter(|row| row.on).count() == 1;
+        let row = if assistant {
+            choice.assistants.get_mut(cursor)
+        } else {
+            choice.kinds.get_mut(cursor - choice.assistants.len())
+        };
+        let Some(row) = row else {
+            return Outcome::Nothing;
+        };
+        if !assistant && row.on && last_kind {
+            self.show(Notice::error(
+                "Leave at least one kind on, or unlink this computer from the Account tab.",
+            ));
+            return Outcome::Nothing;
+        }
+        row.on = !row.on;
+        let request = Request::Choose {
+            assistant,
+            id: row.id.clone(),
+            on: row.on,
+        };
+        let text = if row.on {
+            format!("{} on: linked on the next sync.", row.name)
+        } else {
+            format!("{} off: its files are its own again.", row.name)
+        };
+        self.show(Notice::info(text));
+        Outcome::Send(request)
+    }
+
     fn use_selected_pouch(&mut self) -> Outcome {
         let cursor = self.cursor(Tab::Pouches);
         let Status::Ready(dashboard) = &mut self.status else {
@@ -552,6 +617,36 @@ pub(crate) mod tests {
             usage: Ok(crate::usage::tests::usage()),
             first_sync: None,
             sync: None,
+            choice: crate::model::ChoiceView {
+                assistants: vec![
+                    crate::model::ChoiceRow {
+                        id: "claude-code".into(),
+                        name: "Claude Code".into(),
+                        on: true,
+                        note: None,
+                    },
+                    crate::model::ChoiceRow {
+                        id: "opencode".into(),
+                        name: "OpenCode".into(),
+                        on: true,
+                        note: Some("only read: part of a git checkout".into()),
+                    },
+                ],
+                kinds: vec![
+                    crate::model::ChoiceRow {
+                        id: "skill".into(),
+                        name: "Skills".into(),
+                        on: true,
+                        note: None,
+                    },
+                    crate::model::ChoiceRow {
+                        id: "hook".into(),
+                        name: "Hooks".into(),
+                        on: true,
+                        note: None,
+                    },
+                ],
+            },
         }
     }
 
@@ -571,7 +666,7 @@ pub(crate) mod tests {
         press(&mut app, KeyCode::Char('3'));
         assert_eq!(app.tab, Tab::Usage);
         press(&mut app, KeyCode::Tab);
-        assert_eq!(app.tab, Tab::Computers);
+        assert_eq!(app.tab, Tab::Sync);
         for _ in 0..4 {
             press(&mut app, KeyCode::Left);
         }
@@ -684,7 +779,7 @@ pub(crate) mod tests {
     #[test]
     fn logging_in_again_can_be_left_for_the_dashboard() {
         let mut app = ready();
-        press(&mut app, KeyCode::Char('5'));
+        press(&mut app, KeyCode::Char('6'));
         for _ in 0..3 {
             press(&mut app, KeyCode::Down);
         }
@@ -695,9 +790,54 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_sync_tab_turns_assistants_and_kinds_on_and_off() {
+        let mut app = ready();
+        press(&mut app, KeyCode::Char('4'));
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Outcome::Send(Request::Choose {
+                assistant: true,
+                id: "claude-code".into(),
+                on: false,
+            })
+        );
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(
+            press(&mut app, KeyCode::Char(' ')),
+            Outcome::Send(Request::Choose {
+                assistant: false,
+                id: "skill".into(),
+                on: false,
+            })
+        );
+        // The last kind on stays on.
+        press(&mut app, KeyCode::Down);
+        assert_eq!(press(&mut app, KeyCode::Enter), Outcome::Nothing);
+        assert!(
+            app.notice()
+                .is_some_and(|n| n.text.contains("at least one"))
+        );
+    }
+
+    #[test]
+    fn unlink_asks_first() {
+        let mut app = ready();
+        press(&mut app, KeyCode::Char('6'));
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(press(&mut app, KeyCode::Enter), Outcome::Nothing);
+        assert!(app.confirm_unlink);
+        assert_eq!(
+            press(&mut app, KeyCode::Char('y')),
+            Outcome::Send(Request::Unlink)
+        );
+    }
+
+    #[test]
     fn logout_asks_first() {
         let mut app = ready();
-        press(&mut app, KeyCode::Char('5'));
+        press(&mut app, KeyCode::Char('6'));
         press(&mut app, KeyCode::Up);
         assert_eq!(press(&mut app, KeyCode::Enter), Outcome::Nothing);
         assert!(app.confirm_logout);
@@ -747,7 +887,7 @@ pub(crate) mod tests {
         press(&mut app, KeyCode::Esc);
         assert!(app.setup.is_none());
         assert!(app.notice().is_some_and(|n| n.text.starts_with("Skipped")));
-        press(&mut app, KeyCode::Char('5'));
+        press(&mut app, KeyCode::Char('6'));
         assert_eq!(
             press(&mut app, KeyCode::Enter),
             Outcome::Send(Request::Setup)

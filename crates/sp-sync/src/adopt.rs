@@ -288,7 +288,7 @@ mod tests {
         let text = String::from_utf8_lossy(&found[0].item.files["COMMAND.md"].bytes).into_owned();
         assert_eq!(
             text,
-            "---\ndescription: \"Review code\"\n---\n\nReview $ARGUMENTS"
+            "---\ndescription: Review code\n---\n\nReview $ARGUMENTS"
         );
         Ok(())
     }

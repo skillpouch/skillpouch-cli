@@ -11,6 +11,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("status", "Account, plan and storage"),
     ("sync", "Sync this computer's pouch now"),
     ("daemon start", "Keep it in sync in the background"),
+    ("select", "Choose which assistants and kinds sync here"),
+    ("unlink", "Stop syncing an assistant, or this computer"),
     ("logout", "Forget this computer's keys"),
 ];
 

@@ -51,6 +51,23 @@ pub enum Command {
     },
     /// Sync this computer's pouch now.
     Sync,
+    /// Choose what this computer syncs: assistants and kinds, on or off.
+    /// Without options, lists the current choice.
+    Select {
+        /// Turn on (an assistant id like `codex`, or `skills`, `mcp`, `hooks`…).
+        #[arg(long, value_name = "NAME")]
+        on: Vec<String>,
+        /// Turn off; its items become the assistant's own files again.
+        #[arg(long, value_name = "NAME")]
+        off: Vec<String>,
+    },
+    /// Stop syncing one assistant, or this whole computer. Every file stays,
+    /// as a real file instead of a link.
+    Unlink {
+        /// Only this assistant (`claude-code`, `codex`, …).
+        #[arg(long, value_name = "ID")]
+        assistant: Option<String>,
+    },
     /// The background sync that keeps this computer up to date.
     Daemon {
         #[command(subcommand)]

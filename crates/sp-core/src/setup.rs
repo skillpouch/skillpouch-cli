@@ -67,6 +67,11 @@ impl SetupRecord {
         write_private(&path, &bytes)
     }
 
+    /// Forgets the setup: the computer is set up again from the start.
+    pub fn remove(home: &Home) -> Result<bool> {
+        crate::home::remove_optional(&Self::path(home))
+    }
+
     /// This login hasn't been set up yet (no record, or one from another login).
     pub fn needed(home: &Home, device_id: &str) -> bool {
         Self::load(home)
