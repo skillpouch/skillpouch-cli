@@ -45,6 +45,8 @@ struct Reply {
 impl Client {
     /// `base` is the server origin, e.g. `https://skillpouch.net`.
     pub fn new(base: &str, user_agent: &str) -> Result<Self> {
+        // Already installed by an earlier client: that's fine.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let http = reqwest::Client::builder()
             .user_agent(user_agent)
             .connect_timeout(Duration::from_secs(10))

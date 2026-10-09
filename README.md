@@ -12,7 +12,8 @@ The `skillpouch` command-line tool and background sync daemon.
 | `crates/sp-sync/` | The sync engine: the pouch as plain files in `~/.skillpouch/pouches/<id>/`, three-way compare with the server, encrypted commits, links into each assistant, and MCP servers, hooks and plugins in their configs. |
 | `crates/sp-tui/` | The terminal UI (ratatui): overview with the animated mascot, pouches (pick the one this computer syncs), token usage, computers, account. |
 | `crates/sp-usage/` | Token counts per day and model from Claude Code, Codex and OpenCode logs. Only counts leave the computer. |
-| `npm/skillpouch/` | The npm package `skillpouch` (`npx skillpouch …`). Today a placeholder; later a thin launcher for the native binary. |
+| `npm/skillpouch/` | The npm package `skillpouch` (`npx skillpouch …`): a launcher that runs the native binary from `@skillpouch/cli-<os>-<cpu>`. |
+| `scripts/` | `next-version.sh` (the next release version) and `npm-packages.mjs` (the npm packages of a release). |
 
 Server, web app and API contracts live in the separate `skillpouch` repository.
 
@@ -25,6 +26,9 @@ skillpouch status [--json]
 skillpouch sync             # sync once, in the foreground
 skillpouch daemon start     # keep syncing in the background (systemd / launchd user service)
 skillpouch daemon stop | status
+skillpouch select [--on <name>…] [--off <name>…]   # which assistants and kinds sync here
+skillpouch unlink [--assistant <id>]              # stop syncing one assistant, or this computer
+skillpouch conflicts        # open the web app to pick versions of items changed in two places
 skillpouch logout
 skillpouch --version
 ```
@@ -65,6 +69,19 @@ skillpouch --version
   seconds. Its log is `~/.skillpouch/logs/sync.log`; its state is in
   `~/.skillpouch/state/sync-status.json`, which the TUI shows on the overview.
 
+- Agents and commands are stored the way Claude Code writes them and translated
+  for each assistant: OpenCode (`mode: subagent`, tools as `tool: false`), Gemini
+  CLI and Qwen Code (`read_file`, `run_shell_command`, TOML commands with
+  `{{args}}`), Copilot CLI (`read`, `edit`, `shell`), Factory droids, Codex
+  prompts, Cursor commands and Windsurf workflows. Edits made there come back
+  translated, keeping what the assistant can't express.
+- An item changed in two places before they synced becomes a conflict: every
+  computer keeps the pouch's version until someone picks one in the web app
+  (`skillpouch conflicts`, `c` in the TUI).
+- `skillpouch select` turns assistants and kinds off per computer; `skillpouch
+  unlink` stops syncing one assistant or the whole computer. Either way the links
+  become real files, so the assistants keep working without SkillPouch.
+
 Exit codes: `0` ok, `1` error, `2` usage, `3` not logged in, `130` cancelled.
 
 ## Development
@@ -97,3 +114,21 @@ Never unpublish a version: publish a higher one instead.
 ## License
 
 AGPL-3.0-only.
+
+## Releases
+
+Pushing to the `release` branch releases (`.github/workflows/release.yml`):
+
+```sh
+git push origin main:release
+```
+
+- **Version:** the last `v*` tag, bumped by the commits since: `[major]` or
+  `BREAKING` in a message → major, `[minor]` or a message starting with `feat`
+  → minor, otherwise patch. Nobody edits a version by hand; the tag records it.
+- **Binaries:** static Linux (x64, arm64, musl), macOS (x64, arm64) and Windows
+  (x64, arm64), attached to a GitHub release with `SHA256SUMS`.
+- **npm:** `@skillpouch/cli-<os>-<cpu>` per platform (with `os`/`cpu`, so npm
+  installs only the matching one), then `skillpouch`, which lists them as
+  optional dependencies of the same version and runs the right binary. Needs the
+  `NPM_TOKEN` secret.

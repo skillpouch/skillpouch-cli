@@ -1,0 +1,143 @@
+name: release
+
+# Every push to the `release` branch ships a new version: the version comes
+# from the last `v*` tag and the commits since (scripts/next-version.sh), the
+# binaries are built for every platform, and npm gets `skillpouch` plus one
+# `@skillpouch/cli-<os>-<cpu>` package per platform. Nothing in the repository
+# changes; the tag is the record of what was released.
+#
+#   git push origin main:release
+#
+# Needs the repository secret NPM_TOKEN (an npm automation token that may
+# publish `skillpouch` and the `@skillpouch` scope).
+
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: next version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: next
+        run: echo "version=$(scripts/next-version.sh)" >> "$GITHUB_OUTPUT"
+      - run: echo "Releasing ${{ steps.next.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: version
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: aarch64-pc-windows-msvc, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      # Static Linux builds: C code (ring, SQLite) goes through musl's gcc.
+      CC_x86_64_unknown_linux_musl: musl-gcc
+      CC_aarch64_unknown_linux_musl: musl-gcc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stamp the version
+        shell: bash
+        run: |
+          sed -i.bak "/^\[workspace.package\]/,/^\[/s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+          rm Cargo.toml.bak
+          cargo update --workspace --offline || cargo update --workspace
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: rustup target add ${{ matrix.target }}
+      - if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }} -p skillpouch
+      - name: Check it runs
+        if: "!startsWith(matrix.target, 'aarch64-pc-windows') && !(startsWith(matrix.target, 'x86_64-apple'))"
+        shell: bash
+        run: |
+          out=$(target/${{ matrix.target }}/release/skillpouch --version)
+          echo "$out"
+          [[ "$out" == *"$VERSION"* ]]
+      - name: Collect
+        shell: bash
+        run: |
+          mkdir -p dist
+          ext=""
+          [[ "${{ matrix.target }}" == *windows* ]] && ext=".exe"
+          cp "target/${{ matrix.target }}/release/skillpouch$ext" "dist/skillpouch-${{ matrix.target }}$ext"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skillpouch-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish ${{ needs.version.outputs.version }}
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          path: binaries
+          merge-multiple: true
+      - name: Package for npm
+        run: node scripts/npm-packages.mjs "$VERSION" binaries npm-out | tee packages.txt
+      - name: Publish the platform packages, then skillpouch
+        run: |
+          publish() {
+            local name=$1 dir=$2
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "$name@$VERSION is already on npm"
+            else
+              (cd "$dir" && npm publish --access public)
+            fi
+          }
+          grep -v '^skillpouch	' packages.txt | while IFS=$'\t' read -r name dir; do publish "$name" "$dir"; done
+          publish skillpouch npm-out/skillpouch
+      - name: GitHub release
+        run: |
+          cd binaries
+          for file in *; do
+            case "$file" in
+              *.exe) zip -q "${file%.exe}.zip" "$file" ;;
+              *) tar -czf "$file.tar.gz" "$file" ;;
+            esac
+          done
+          sha256sum *.zip *.tar.gz > SHA256SUMS
+          gh release create "v$VERSION" *.zip *.tar.gz SHA256SUMS \
+            --target "$GITHUB_SHA" --title "v$VERSION" --generate-notes

@@ -2,11 +2,33 @@
 	"name": "skillpouch",
 	"version": "0.0.1",
 	"description": "Sync your AI assistant skills, agents, MCP servers and instructions across every computer, end-to-end encrypted.",
-	"keywords": ["ai", "skills", "agents", "mcp", "claude-code", "codex", "opencode", "sync", "e2ee"],
+	"keywords": [
+		"ai",
+		"skills",
+		"agents",
+		"mcp",
+		"claude-code",
+		"codex",
+		"opencode",
+		"sync",
+		"e2ee"
+	],
 	"homepage": "https://skillpouch.net",
 	"license": "AGPL-3.0-only",
 	"author": "SkillPouch <info@skillpouch.net>",
-	"bin": { "skillpouch": "bin/skillpouch.js" },
-	"files": ["bin", "README.md", "LICENSE"],
-	"engines": { "node": ">=18" }
+	"bin": {
+		"skillpouch": "bin/skillpouch.js"
+	},
+	"files": [
+		"bin",
+		"README.md",
+		"LICENSE"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/skillpouch/skillpouch-cli.git"
+	},
+	"engines": {
+		"node": ">=18"
+	}
 }
