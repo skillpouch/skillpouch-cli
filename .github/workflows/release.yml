@@ -8,8 +8,8 @@ name: release
 #
 #   git push origin main:release
 #
-# Needs the repository secret NPM_TOKEN (an npm automation token that may
-# publish `skillpouch` and the `@skillpouch` scope).
+# npm publishing uses trusted publishing (OIDC): no token is stored. Each
+# package on npmjs.com trusts this repository's `release.yml`.
 
 on:
   push:
@@ -103,14 +103,19 @@ jobs:
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.version.outputs.version }}
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       GH_TOKEN: ${{ github.token }}
+    permissions:
+      contents: write
+      # Trusted publishing: npm trades this job's OIDC token for a publish token.
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@latest
       - uses: actions/download-artifact@v4
         with:
           path: binaries

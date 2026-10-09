@@ -139,5 +139,6 @@ git push origin main:release
   (x64, arm64), attached to a GitHub release with `SHA256SUMS`.
 - **npm:** `@skillpouch/cli-<os>-<cpu>` per platform (with `os`/`cpu`, so npm
   installs only the matching one), then `skillpouch`, which lists them as
-  optional dependencies of the same version and runs the right binary. Needs the
-  `NPM_TOKEN` secret.
+  optional dependencies of the same version and runs the right binary. Published
+  with npm trusted publishing: each package trusts `skillpouch/skillpouch-cli`,
+  workflow `release.yml`; no token is stored.
