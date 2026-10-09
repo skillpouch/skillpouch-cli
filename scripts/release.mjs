@@ -37,7 +37,7 @@ export function stampCargoToml(text, version) {
 		if (/^\s*\[/.test(line)) inTable = line.trim() === '[workspace.package]';
 		if (inTable && !stamped && /^version\s*=/.test(line)) {
 			stamped = true;
-			return `version = "${version}"`;
+			return `version = "${version}"${line.endsWith('\r') ? '\r' : ''}`;
 		}
 		return line;
 	});
@@ -48,13 +48,13 @@ export function stampCargoToml(text, version) {
 /** Sets the version of every workspace crate: the packages without a `source`. */
 export function stampCargoLock(text, version) {
 	return text
-		.split('\n[[package]]\n')
+		.split(/(?=^\[\[package\]\]\r?$)/m)
 		.map((block, index) =>
 			index === 0 || /^source = /m.test(block)
 				? block
-				: block.replace(/^version = ".*"$/m, `version = "${version}"`),
+				: block.replace(/^version = ".*"(?=\r?$)/m, `version = "${version}"`),
 		)
-		.join('\n[[package]]\n');
+		.join('');
 }
 
 /** `skillpouch` on npm: its version and the platform packages it runs. */

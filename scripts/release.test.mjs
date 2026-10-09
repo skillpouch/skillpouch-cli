@@ -93,3 +93,27 @@ test('npm gets one package per platform', () => {
 	const meta = JSON.parse(readFileSync(join(linux.dir, 'package.json'), 'utf8'));
 	assert.deepEqual([meta.version, meta.os, meta.cpu], ['1.2.3', ['linux'], ['x64']]);
 });
+
+test('Windows line endings are stamped too', () => {
+	const toml = '[workspace.package]\r\nversion = "0.1.0"\r\nedition = "2024"\r\n';
+	assert.equal(
+		stampCargoToml(toml, '2.0.0'),
+		'[workspace.package]\r\nversion = "2.0.0"\r\nedition = "2024"\r\n',
+	);
+	const lock = [
+		'version = 4',
+		'',
+		'[[package]]',
+		'name = "serde"',
+		'version = "1.0.0"',
+		'source = "registry+https://github.com/rust-lang/crates.io-index"',
+		'',
+		'[[package]]',
+		'name = "skillpouch"',
+		'version = "0.1.0"',
+		'',
+	].join('\r\n');
+	const stamped = stampCargoLock(lock, '2.0.0');
+	assert.match(stamped, /name = "serde"\r\nversion = "1.0.0"\r\n/);
+	assert.match(stamped, /name = "skillpouch"\r\nversion = "2.0.0"\r\n/);
+});
