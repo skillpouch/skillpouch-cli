@@ -7,13 +7,15 @@
 //!
 //! One runs per `~/.skillpouch` (a lock file sees to that), started as a
 //! user service (systemd on Linux, launchd on macOS) or, where there is
-//! none, as a detached process.
+//! none, as a detached process. It starts over on its own when this
+//! computer moves to another server or a newer SkillPouch is installed.
 
 use crate::context::{Context, Session, VERSION};
 use crate::sync::{self, Report};
 use anyhow::{Context as _, Result};
 use sp_core::home::user_home;
 use sp_core::setup::SetupRecord;
+use sp_core::{Config, Credentials, Home};
 use sp_harness::Places;
 use sp_sync::status::{Phase, SyncStatus};
 use std::collections::hash_map::DefaultHasher;
@@ -37,6 +39,9 @@ const UPDATE_CHECK: Duration = Duration::from_secs(30 * 60);
 /// How often token usage is counted and sent, so the website stays current
 /// without the TUI open.
 const USAGE_EVERY: Duration = Duration::from_secs(10 * 60);
+/// How often the background sync checks whether it should start over with
+/// another server or a newly installed version.
+const DRIFT_CHECK: Duration = Duration::from_secs(60);
 /// The log is started over past this size.
 const LOG_MAX: u64 = 1024 * 1024;
 
@@ -156,9 +161,167 @@ pub fn describe_report(report: &Report) -> String {
     parts.join("; ")
 }
 
-/// `skillpouch daemon run`: syncs until stopped.
-pub async fn run(ctx: &Context) -> Result<()> {
-    let Some(_lock) = try_lock(ctx)? else {
+/// The server a background sync started now syncs with: the one this
+/// computer logged in to, else the configured one.
+pub fn server(home: &Home) -> Result<String> {
+    let config = Config::load(home)?;
+    Ok(match Credentials::load(home)? {
+        Some(saved) => saved.api_url,
+        None => config.api_url(),
+    })
+}
+
+/// Why a background sync starts over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Restart {
+    /// This computer now syncs with another server.
+    Server(String),
+    /// A newer version was installed in this program's place.
+    Version(String),
+}
+
+impl Restart {
+    fn describe(&self) -> String {
+        match self {
+            Self::Server(url) => format!("starting over with {url}"),
+            Self::Version(version) => format!("starting over as {version}, just installed"),
+        }
+    }
+}
+
+/// Whether one syncing with `own_url` as `own_version` should start over,
+/// given the server a fresh start would use and the version now installed
+/// (`None` when it can't be told or doesn't apply).
+fn restart_for(
+    own_url: &str,
+    own_version: &str,
+    server: Option<&str>,
+    installed: Option<&str>,
+) -> Option<Restart> {
+    if let Some(server) = server.map(|url| url.trim_end_matches('/'))
+        && !server.is_empty()
+        && server != own_url.trim_end_matches('/')
+    {
+        return Some(Restart::Server(server.to_string()));
+    }
+    installed
+        .filter(|version| crate::update::newer(version, own_version))
+        .map(|version| Restart::Version(version.to_string()))
+}
+
+/// The size and time of a file, to tell when it was replaced.
+type Stamp = (u64, Option<SystemTime>);
+
+fn stamp(path: &Path) -> Option<Stamp> {
+    let meta = fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()))
+}
+
+/// The version the program at `exe` reports.
+fn reported_version(exe: &Path) -> Option<String> {
+    let mut command = std::process::Command::new(exe);
+    command
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .last()
+        .map(str::to_string)
+}
+
+/// Keeps an eye on what a background sync started now would do otherwise.
+struct Watch {
+    /// The server was given (`--api-url` or `SKILLPOUCH_API_URL`): kept.
+    pinned: bool,
+    due: tokio::time::Instant,
+    /// Installed with a package manager; builds from source and temporary
+    /// copies are left as they are.
+    exe: Option<PathBuf>,
+    seen: Option<Stamp>,
+    problem: Option<String>,
+}
+
+impl Watch {
+    fn new(pinned: bool) -> Self {
+        let pinned =
+            pinned || std::env::var("SKILLPOUCH_API_URL").is_ok_and(|value| !value.is_empty());
+        let exe = crate::update::exe().filter(|exe| crate::update::installer(exe).is_some());
+        Self {
+            pinned,
+            due: tokio::time::Instant::now() + DRIFT_CHECK,
+            seen: exe.as_deref().and_then(stamp),
+            exe,
+            problem: None,
+        }
+    }
+
+    /// The version now installed, asked only once the program was replaced.
+    async fn installed(&mut self) -> Option<String> {
+        let exe = self.exe.clone()?;
+        let now = stamp(&exe)?;
+        if self.seen == Some(now) {
+            return None;
+        }
+        let version = tokio::task::spawn_blocking(move || reported_version(&exe))
+            .await
+            .ok()
+            .flatten()?;
+        self.seen = Some(now);
+        Some(version)
+    }
+
+    /// Returns when the background sync should start over.
+    async fn drifted(&mut self, ctx: &Context, log: &Log) -> Restart {
+        loop {
+            tokio::time::sleep_until(self.due).await;
+            self.due = tokio::time::Instant::now() + DRIFT_CHECK;
+            let server = if self.pinned {
+                None
+            } else {
+                match server(&ctx.home) {
+                    Ok(url) => {
+                        self.problem = None;
+                        Some(url)
+                    }
+                    Err(error) => {
+                        // Carries on with the server it has, saying so once.
+                        let problem = format!("couldn't read which server to sync with: {error:#}");
+                        if self.problem.as_ref() != Some(&problem) {
+                            log.line(&problem);
+                            self.problem = Some(problem);
+                        }
+                        None
+                    }
+                }
+            };
+            let installed = self.installed().await;
+            if let Some(restart) = restart_for(
+                ctx.client.base(),
+                VERSION,
+                server.as_deref(),
+                installed.as_deref(),
+            ) {
+                return restart;
+            }
+        }
+    }
+}
+
+/// `skillpouch daemon run`: syncs until stopped. `pinned`: started with
+/// `--api-url`, so it keeps that server.
+pub async fn run(ctx: &Context, pinned: bool) -> Result<()> {
+    let Some(lock) = try_lock(ctx)? else {
         anyhow::bail!(
             "a background sync is already running for {}",
             ctx.home.root().display()
@@ -183,14 +346,12 @@ pub async fn run(ctx: &Context) -> Result<()> {
     let mut update_due = std::time::Instant::now();
     let mut usage_due = std::time::Instant::now();
     let reported = crate::usage::Reported::default();
+    let mut watch = Watch::new(pinned);
     loop {
         if std::time::Instant::now() >= update_due {
             update_due = std::time::Instant::now() + UPDATE_CHECK;
             if crate::update::in_background(ctx, &log).await {
-                set_pid(ctx, None);
-                let _ = fs::remove_file(identity_path(ctx));
-                drop(_lock);
-                return restart_updated(&log);
+                return start_over(ctx, lock, &log);
             }
         }
         let session = ctx.session();
@@ -250,6 +411,10 @@ pub async fn run(ctx: &Context) -> Result<()> {
         tokio::select! {
             () = &mut stopped => break,
             _ = woke => {}
+            restart = watch.drifted(ctx, &log) => {
+                log.line(&restart.describe());
+                return start_over(ctx, lock, &log);
+            }
         }
         tokio::time::sleep(SETTLE).await;
     }
@@ -259,9 +424,18 @@ pub async fn run(ctx: &Context) -> Result<()> {
     Ok(())
 }
 
-/// Carries on as the version just installed: same process (the service
+/// Lets go of this background sync and runs it again, with whatever
+/// program and server are current now.
+fn start_over(ctx: &Context, lock: fs::File, log: &Log) -> Result<()> {
+    set_pid(ctx, None);
+    let _ = fs::remove_file(identity_path(ctx));
+    drop(lock);
+    restart(log)
+}
+
+/// Carries on as the program now installed: same process (the service
 /// manager keeps track of it), new program.
-fn restart_updated(log: &Log) -> Result<()> {
+fn restart(log: &Log) -> Result<()> {
     let exe = crate::update::exe().context("couldn't find the skillpouch program")?;
     let mut command = std::process::Command::new(&exe);
     command.args(std::env::args_os().skip(1));
@@ -538,11 +712,11 @@ fn spawn(ctx: &Context, exe: &Path) -> Result<()> {
         .create(true)
         .append(true)
         .open(&log.path)?;
+    // Like the service, it finds the server itself, so it can follow a move.
     let mut command = std::process::Command::new(exe);
     command
         .args(["daemon", "run", "--home"])
         .arg(ctx.home.root())
-        .args(["--api-url", ctx.client.base()])
         .stdin(std::process::Stdio::null())
         .stdout(out.try_clone()?)
         .stderr(out);
@@ -838,6 +1012,62 @@ mod tests {
             assert!(other.outdated(&ctx), "{other:?}");
         }
         Ok(())
+    }
+
+    #[test]
+    fn it_starts_over_for_another_server_or_a_newer_version() {
+        let own = "https://app.skillpouch.net";
+        assert_eq!(restart_for(own, "0.2.0", Some(own), Some("0.2.0")), None);
+        assert_eq!(
+            restart_for(own, "0.2.0", Some("https://app.skillpouch.net/"), None),
+            None
+        );
+        assert_eq!(
+            restart_for(own, "0.2.0", Some("https://v2.skillpouch.net"), None),
+            Some(Restart::Server("https://v2.skillpouch.net".into()))
+        );
+        assert_eq!(
+            restart_for(own, "0.2.0", Some(own), Some("0.3.0")),
+            Some(Restart::Version("0.3.0".into()))
+        );
+        // The server comes first: the new start picks up both.
+        assert_eq!(
+            restart_for(own, "0.2.0", Some("http://localhost:5173"), Some("0.3.0")),
+            Some(Restart::Server("http://localhost:5173".into()))
+        );
+        // Older, the same, pre-releases or nonsense: it stays.
+        for installed in ["0.1.9", "0.2.0", "0.3.0-beta.1", "garbage"] {
+            assert_eq!(
+                restart_for(own, "0.2.0", Some(own), Some(installed)),
+                None,
+                "{installed}"
+            );
+        }
+        // Can't tell (unreadable, or pinned): it stays.
+        assert_eq!(restart_for(own, "0.2.0", None, None), None);
+        assert_eq!(restart_for(own, "0.2.0", Some(""), None), None);
+    }
+
+    #[test]
+    fn a_fresh_start_syncs_with_the_logged_in_server() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let home = Home::new(dir.path().join(".skillpouch"));
+        home.ensure_private_dir(home.root())?;
+        fs::write(home.config_file(), "api_url = \"https://skillpouch.net\"\n")?;
+        if std::env::var_os("SKILLPOUCH_API_URL").is_none() {
+            assert_eq!(server(&home)?, "https://app.skillpouch.net");
+        }
+        fs::write(home.config_file(), "api_url = [")?;
+        assert!(server(&home).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn the_installed_version_is_read_from_the_program() {
+        let exe = crate::update::exe();
+        assert!(exe.as_deref().and_then(stamp).is_some());
+        assert_eq!(stamp(Path::new("/nonexistent/skillpouch")), None);
+        assert_eq!(reported_version(Path::new("/nonexistent/skillpouch")), None);
     }
 
     #[test]

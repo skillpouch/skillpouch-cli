@@ -72,7 +72,11 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
             DaemonAction::Start => sync::start(&ctx),
             DaemonAction::Stop => sync::stop(&ctx),
             DaemonAction::Status => sync::status(&ctx),
-            DaemonAction::Run { background, .. } => sync::run_daemon(&ctx, background).await,
+            DaemonAction::Run {
+                background,
+                api_url,
+                ..
+            } => sync::run_daemon(&ctx, background, api_url.is_some()).await,
         },
     }
 }
@@ -93,10 +97,8 @@ fn daemon_context(home: Option<std::path::PathBuf>, api_url: Option<String>) -> 
     if api_url.is_some() {
         return Ok(ctx);
     }
-    match sp_core::Credentials::load(&ctx.home) {
-        Ok(Some(saved)) if saved.api_url != ctx.client.base() => {
-            Context::load_with(home, Some(saved.api_url))
-        }
+    match crate::daemon::server(&ctx.home) {
+        Ok(url) if url != ctx.client.base() => Context::load_with(home, Some(url)),
         _ => Ok(ctx),
     }
 }
