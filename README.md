@@ -1,5 +1,5 @@
 <div align="center">
-  <img src=".github/assets/hero.png" alt="SkillPouch CLI — your AI coding setup, on every computer" width="100%" />
+  <img src=".github/assets/banner.png" alt="SkillPouch CLI — sync your AI coding setup from the terminal" width="100%" />
 
   <p><strong>Sync the setup behind your AI coding workflow.</strong><br />A native CLI, terminal dashboard and background sync for your assistants.</p>
 
@@ -15,16 +15,20 @@
   </p>
 </div>
 
+<p align="center">
+  <a href=".github/assets/promo-poster.png"><img src=".github/assets/promo-highlight.webp" alt="Animated clip: the SkillPouch terminal dashboard and token usage, then skills, agents, MCP servers and more drop into an encrypted pouch" width="100%" /></a>
+</p>
+
 ## Start here
 
 Install the native CLI through npm:
 
 ```sh
 npm i -g skillpouch
-skillpouch login
+skillpouch
 ```
 
-Create a one-time connect token in the [SkillPouch app](https://app.skillpouch.net), then use it when prompted (or pass it as `skillpouch login <token>`). The login flow helps choose a pouch and assistants. Once connected, run `skillpouch` to open the terminal dashboard.
+`skillpouch` opens the terminal dashboard. The first time, it signs this computer in through your browser and helps you choose a pouch and assistants. On a machine without a browser, use `skillpouch login <token>` with a one-time token from the [SkillPouch app](https://app.skillpouch.net).
 
 ![SkillPouch terminal dashboard](.github/assets/tui-overview.webp)
 
