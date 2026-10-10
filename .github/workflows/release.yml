@@ -38,6 +38,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+# Linux runners are pinned to ubuntu-24.04: a new `ubuntu-latest` image only
+# arrives on purpose, not under a green build.
 jobs:
   plan:
     name: next version
@@ -45,7 +47,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       id-token: write
@@ -53,14 +55,14 @@ jobs:
       version: ${{ steps.plan.outputs.version }}
       sha: ${{ steps.plan.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
       # semantic-release works on a branch; it stops by itself when the remote
       # main has commits this one doesn't.
       - run: git switch -C main
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -87,7 +89,7 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04 }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
           - { target: x86_64-apple-darwin, os: macos-latest }
           - { target: aarch64-apple-darwin, os: macos-latest }
@@ -100,7 +102,7 @@ jobs:
       CC_x86_64_unknown_linux_musl: musl-gcc
       CC_aarch64_unknown_linux_musl: musl-gcc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.plan.outputs.sha }}
       - run: node scripts/release.mjs stamp "$VERSION"
@@ -129,7 +131,7 @@ jobs:
           ext=""
           [[ "${{ matrix.target }}" == *windows* ]] && ext=".exe"
           cp "target/${{ matrix.target }}/release/skillpouch$ext" "dist/skillpouch-${{ matrix.target }}$ext"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: skillpouch-${{ matrix.target }}
           path: dist/*
@@ -138,18 +140,18 @@ jobs:
   release:
     name: release v${{ needs.plan.outputs.version }}
     needs: [plan, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       # Trusted publishing: npm trades this job's OIDC token for a publish token.
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.plan.outputs.sha }}
           fetch-depth: 0
       - run: git switch -C main
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -157,7 +159,7 @@ jobs:
       # Trusted publishing needs npm 11.5.1 or later.
       - run: npm install -g npm@latest
       - run: npm ci
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: binaries
           merge-multiple: true
