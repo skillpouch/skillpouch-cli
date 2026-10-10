@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.1](https://github.com/skillpouch/skillpouch-cli/compare/v0.2.0...v0.2.1) (2026-10-10)
+
+### Bug fixes
+
+* **core:** use app.skillpouch.net as the default server ([ac8eea7](https://github.com/skillpouch/skillpouch-cli/commit/ac8eea72d74b618e08723f037e28030d9a17821f))
+
 ## [0.2.0](https://github.com/skillpouch/skillpouch-cli/compare/v0.1.1...v0.2.0) (2026-10-10)
 
 ### Features

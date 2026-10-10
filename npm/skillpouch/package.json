@@ -1,6 +1,6 @@
 {
 	"name": "skillpouch",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"description": "Sync your AI assistant skills, agents, MCP servers and instructions across every computer, end-to-end encrypted.",
 	"keywords": [
 		"ai",
@@ -32,11 +32,11 @@
 		"node": ">=18"
 	},
 	"optionalDependencies": {
-		"@skillpouch/cli-linux-x64": "0.2.0",
-		"@skillpouch/cli-linux-arm64": "0.2.0",
-		"@skillpouch/cli-darwin-x64": "0.2.0",
-		"@skillpouch/cli-darwin-arm64": "0.2.0",
-		"@skillpouch/cli-win32-x64": "0.2.0",
-		"@skillpouch/cli-win32-arm64": "0.2.0"
+		"@skillpouch/cli-linux-x64": "0.2.1",
+		"@skillpouch/cli-linux-arm64": "0.2.1",
+		"@skillpouch/cli-darwin-x64": "0.2.1",
+		"@skillpouch/cli-darwin-arm64": "0.2.1",
+		"@skillpouch/cli-win32-x64": "0.2.1",
+		"@skillpouch/cli-win32-arm64": "0.2.1"
 	}
 }
