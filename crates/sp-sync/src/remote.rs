@@ -2,18 +2,19 @@
 //! new revisions sealed and signed by this computer.
 
 use crate::item::{self, File, Files};
+use crate::state::RosterPin;
 use crate::{Result, SyncError};
 use sp_api::Client;
 use sp_api::types::{
     BlobCheck, CommitRequest, Operation, OperationResult, PouchSummary, RevisionRecord,
 };
-use sp_core::Credentials;
+use sp_core::{Credentials, Home};
 use sp_crypto::pouch::{
     ManifestEntry, PouchKeys, RevisionBody, RevisionColumns, SealedBlob, frame_batch, parse_fetched,
 };
-use sp_crypto::vault;
-use sp_crypto::{EncKey, PublicJwk, SignKey};
-use std::collections::{BTreeMap, HashMap};
+use sp_crypto::vault::{self, Welcome};
+use sp_crypto::{CryptoError, EncKey, SignKey};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -117,20 +118,21 @@ pub struct Remote<'a> {
     token: String,
     pub pouch: PouchSummary,
     keys: PouchKeys,
-    members: HashMap<String, PublicJwk>,
+    roster: vault::Roster,
     member_id: String,
-    roster_head: String,
 }
 
 impl<'a> Remote<'a> {
     /// Opens `pouch_id` for this computer: verifies the roster against the
-    /// welcome and opens the pouch's key envelopes.
+    /// welcome and the newest roster it verified before (`state/roster.json`
+    /// in `home`), then opens the pouch's key envelopes.
     pub async fn open(
         client: &'a Client,
         key: &'a SignKey,
         token: &str,
         credentials: &Credentials,
         pouch_id: &str,
+        home: &Home,
     ) -> Result<Remote<'a>> {
         let member_id = credentials.member_id.clone().ok_or_else(|| {
             SyncError::Invalid(
@@ -139,6 +141,19 @@ impl<'a> Remote<'a> {
         })?;
         let enc = EncKey::from_b64(&credentials.enc_key)?;
         let welcome = vault::open_welcome(&enc, &member_id, &credentials.welcome)?;
+        let pinned = RosterPin::load(home)?.filter(|pin| {
+            pin.genesis_hash == welcome.genesis_hash
+                && pin.member_id == member_id
+                && pin.head_seq > welcome.roster_head_seq
+        });
+        let trusted = match &pinned {
+            Some(pin) => Welcome {
+                roster_head_seq: pin.head_seq,
+                roster_head_hash: pin.head_hash.clone(),
+                ..welcome.clone()
+            },
+            None => welcome.clone(),
+        };
         let pouches = client.pouches(key, token).await;
         let roster = client.roster(key, token).await;
         let envelopes = client.key_envelopes(key, token).await;
@@ -147,33 +162,51 @@ impl<'a> Remote<'a> {
             .into_iter()
             .find(|pouch| pouch.id == pouch_id)
             .ok_or_else(|| SyncError::Invalid("the pouch this computer syncs is gone".into()))?;
-        let roster = vault::verify_roster(&roster?.statements, &welcome)?;
+        let roster = vault::verify_roster(&roster?.statements, &trusted)?;
+        if pinned
+            .as_ref()
+            .is_none_or(|pin| roster.head_seq > pin.head_seq)
+        {
+            RosterPin {
+                genesis_hash: welcome.genesis_hash.clone(),
+                member_id: member_id.clone(),
+                head_seq: roster.head_seq,
+                head_hash: roster.head_hash.clone(),
+            }
+            .save(home)?;
+        }
+        let announced = roster
+            .pouches
+            .get(pouch_id)
+            .map(|pouch| pouch.key_gen)
+            .ok_or_else(|| CryptoError::Roster("the pouch is not in the account roster".into()))?;
         let opened: Vec<(u32, [u8; 64])> =
-            vault::open_envelopes(&roster, &envelopes?.key_envelopes, &member_id, &enc)
+            vault::open_envelopes(&roster, &envelopes?.key_envelopes, &member_id, &enc)?
                 .into_iter()
                 .filter(|((id, _), _)| id == pouch_id)
                 .map(|((_, key_gen), material)| (key_gen, material))
                 .collect();
         let keys = PouchKeys::new(pouch_id, &opened)?;
+        if keys.key_gen() < announced {
+            // Writing with an older key would let a removed member read it.
+            return Err(CryptoError::Roster(format!(
+                "the server withheld key generation {announced} of this pouch"
+            ))
+            .into());
+        }
         if keys.key_gen() != pouch.key_gen && pouch.key_gen != 0 {
             return Err(SyncError::Invalid(
                 "this computer doesn't have the pouch's newest key yet; open the web app once to share it".into(),
             ));
         }
-        let members = roster
-            .members
-            .iter()
-            .map(|(id, member)| (id.clone(), member.sign_pub.clone()))
-            .collect();
         Ok(Remote {
             client,
             key,
             token: token.to_string(),
             pouch,
             keys,
-            members,
+            roster,
             member_id,
-            roster_head: roster.head_hash,
         })
     }
 
@@ -182,10 +215,10 @@ impl<'a> Remote<'a> {
     }
 
     /// Every global item, deleted ones included, by key. Items this computer
-    /// can't verify are counted, never trusted.
-    pub async fn list(&self) -> Result<(BTreeMap<String, RemoteItem>, usize)> {
+    /// can't verify are returned by artifact id, never trusted.
+    pub async fn list(&self) -> Result<(BTreeMap<String, RemoteItem>, BTreeSet<String>)> {
         let mut items: BTreeMap<String, RemoteItem> = BTreeMap::new();
-        let mut unreadable = 0;
+        let mut unreadable = BTreeSet::new();
         let mut cursor: Option<String> = None;
         loop {
             let (page, next) = self
@@ -203,7 +236,9 @@ impl<'a> Remote<'a> {
                         }
                     }
                     Ok(None) => {}
-                    Err(_) => unreadable += 1,
+                    Err(_) => {
+                        unreadable.insert(artifact.id);
+                    }
                 }
             }
             match next {
@@ -216,9 +251,10 @@ impl<'a> Remote<'a> {
 
     fn open_head(&self, head: &RevisionRecord, deleted: bool) -> Result<Option<RemoteItem>> {
         let signer = self
+            .roster
             .members
             .get(&head.signer_member_id)
-            .ok_or_else(|| SyncError::Invalid("signed by an unknown member".into()))?;
+            .ok_or_else(|| CryptoError::Signature("revision by an unknown member".into()))?;
         let body = self.keys.open_revision(
             &RevisionColumns {
                 artifact_id: &head.artifact_id,
@@ -228,8 +264,17 @@ impl<'a> Remote<'a> {
                 signature: &head.signature,
                 signer_member_id: &head.signer_member_id,
             },
-            signer,
+            &signer.sign_pub,
         )?;
+        if !self
+            .roster
+            .may_sign_revision(&head.signer_member_id, &body.roster_head)
+        {
+            return Err(CryptoError::Signature(
+                "revision by a member removed before it was written".into(),
+            )
+            .into());
+        }
         if body.scope != GLOBAL
             || item::folder_of(&body.kind).is_none()
             || !item::valid_name(&body.logical_key)
@@ -393,7 +438,7 @@ impl<'a> Remote<'a> {
             logical_key: name.to_string(),
             deleted,
             entries,
-            roster_head: self.roster_head.clone(),
+            roster_head: self.roster.head_hash.clone(),
             author_member_id: self.member_id.clone(),
             created_at: iso_now(),
         };

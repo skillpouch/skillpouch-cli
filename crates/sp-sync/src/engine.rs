@@ -179,16 +179,27 @@ pub async fn sync(
     let high_water = remote.pouch.event_seq;
     let (remote_items, unreadable) = remote.list().await?;
     let (folder, skipped) = dir.read()?;
+    // An item whose server version doesn't verify is left alone on both
+    // sides: a tampered head must not delete or replace it here.
+    let held: BTreeSet<String> = state
+        .items
+        .iter()
+        .filter(|(_, agreed)| unreadable.contains(&agreed.artifact_id))
+        .map(|(key, _)| key.clone())
+        .collect();
     let local: BTreeMap<String, Local> = folder
         .into_iter()
+        .filter(|(key, _)| !held.contains(key))
         .map(|(key, item)| {
             let fingerprint = remote.local_fingerprint(&item.files);
             (key, Local { item, fingerprint })
         })
         .collect();
-    let plan = plan(&local, &remote_items, state, options);
+    let mut planned = state.clone();
+    planned.items.retain(|key, _| !held.contains(key));
+    let plan = plan(&local, &remote_items, &planned, options);
     let mut outcome = Outcome {
-        unreadable,
+        unreadable: unreadable.len(),
         skipped,
         ..Outcome::default()
     };

@@ -12,9 +12,9 @@
 //! name_enc       = seal(K_meta, {name, description}, "skillpouch/v1/pouch-name" ‖ pouch_id)
 //! ```
 
-use crate::keys::{EncKey, PublicJwk};
+use crate::keys::{EncKey, PublicJwk, SignKey};
 use crate::{CryptoError, Result, b64, hpke, sealed};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sp_core::canonical::canonical_json;
 use std::collections::{BTreeMap, HashMap};
@@ -25,7 +25,7 @@ const WELCOME: &str = "skillpouch/v1/welcome";
 const POUCH_NAME: &str = "skillpouch/v1/pouch-name";
 
 /// A roster statement as the API returns it.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RosterStatement {
     pub seq: u64,
     /// base64url of the signed canonical JSON.
@@ -34,7 +34,7 @@ pub struct RosterStatement {
     pub signature: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyEnvelope {
     pub pouch_id: String,
     pub member_id: String,
@@ -92,6 +92,8 @@ pub struct RosterPouch {
     pub name_enc: Option<String>,
     pub created_seq: u64,
     pub archived: bool,
+    /// Newest key generation the roster announced (`rotate_keys`).
+    pub key_gen: u32,
 }
 
 /// The roster replayed from its genesis, every link and signature checked.
@@ -101,6 +103,26 @@ pub struct Roster {
     pub head_hash: String,
     pub members: HashMap<String, Member>,
     pub pouches: HashMap<String, RosterPouch>,
+    /// The seq of every statement, by its hash.
+    pub heads: HashMap<String, u64>,
+}
+
+impl Roster {
+    /// Whether `member_id` may have signed a revision that names
+    /// `roster_head` (the roster the author saw). A removed member's
+    /// signature only counts on revisions written before it was removed.
+    pub fn may_sign_revision(&self, member_id: &str, roster_head: &str) -> bool {
+        let Some(member) = self.members.get(member_id) else {
+            return false;
+        };
+        match (self.heads.get(roster_head), member.removed_seq) {
+            (Some(&seq), removed) => {
+                member.added_seq <= seq && removed.is_none_or(|removed| seq < removed)
+            }
+            // A newer head than this roster: only a current member.
+            (None, removed) => removed.is_none(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -116,6 +138,7 @@ struct Body {
     member: Option<MemberEntry>,
     member_id: Option<String>,
     pouch: Option<PouchEntry>,
+    new_generations: Option<BTreeMap<String, u32>>,
 }
 
 #[derive(Deserialize)]
@@ -184,6 +207,7 @@ pub fn verify_roster(statements: &[RosterStatement], welcome: &Welcome) -> Resul
                     head_hash: String::new(),
                     members,
                     pouches: HashMap::new(),
+                    heads: HashMap::new(),
                 })
             }
             Some(state) => {
@@ -212,6 +236,7 @@ pub fn verify_roster(statements: &[RosterStatement], welcome: &Welcome) -> Resul
             }
         };
         state.head_seq = wire.seq;
+        state.heads.insert(hash.clone(), wire.seq);
         state.head_hash = hash;
         if wire.seq == welcome.roster_head_seq && state.head_hash != welcome.roster_head_hash {
             return Err(fork("the roster changed after this computer saw it"));
@@ -258,7 +283,14 @@ fn apply(state: &mut Roster, body: Body) -> Result<()> {
             member.removed_seq = Some(seq);
             Ok(())
         }
-        "rotate_keys" => Ok(()),
+        "rotate_keys" => {
+            for (id, key_gen) in body.new_generations.unwrap_or_default() {
+                if let Some(pouch) = state.pouches.get_mut(&id) {
+                    pouch.key_gen = pouch.key_gen.max(key_gen);
+                }
+            }
+            Ok(())
+        }
         "create_pouch" => {
             let pouch = body
                 .pouch
@@ -272,6 +304,7 @@ fn apply(state: &mut Roster, body: Body) -> Result<()> {
                     name_enc: pouch.name_enc,
                     created_seq: seq,
                     archived: false,
+                    key_gen: 1,
                 },
             );
             Ok(())
@@ -297,33 +330,58 @@ fn apply(state: &mut Roster, body: Body) -> Result<()> {
 }
 
 /// `PS_g ‖ PIS` of every pouch and generation this device has an envelope
-/// for. Envelopes not signed by a roster member are ignored.
+/// for. Envelopes not signed by a roster member, for a pouch or generation
+/// the roster never announced, or from a removed member for the newest
+/// generation are ignored. Two different keys for one generation, or
+/// generations of one pouch that disagree on its identity secret, mean the
+/// server made one up: refused.
 pub fn open_envelopes(
     roster: &Roster,
     envelopes: &[KeyEnvelope],
     member_id: &str,
     key: &EncKey,
-) -> HashMap<(String, u32), [u8; 64]> {
-    let mut opened = HashMap::new();
+) -> Result<HashMap<(String, u32), [u8; 64]>> {
+    let mut opened: HashMap<(String, u32), [u8; 64]> = HashMap::new();
     for envelope in envelopes.iter().filter(|e| e.member_id == member_id) {
-        if let Ok(ps) = open_envelope(roster, envelope, key) {
-            opened.insert((envelope.pouch_id.clone(), envelope.key_gen), ps);
+        let Ok(material) = open_envelope(roster, envelope, key) else {
+            continue;
+        };
+        let slot = (envelope.pouch_id.clone(), envelope.key_gen);
+        if opened.get(&slot).is_some_and(|known| *known != material) {
+            return Err(fork(format!(
+                "two different keys for generation {} of pouch {}",
+                envelope.key_gen, envelope.pouch_id
+            )));
+        }
+        opened.insert(slot, material);
+    }
+    let mut identity: HashMap<&str, &[u8]> = HashMap::new();
+    for ((pouch_id, _), material) in &opened {
+        let pis = &material[32..];
+        if *identity.entry(pouch_id.as_str()).or_insert(pis) != pis {
+            return Err(fork(format!("pouch {pouch_id} has two identity secrets")));
         }
     }
-    opened
+    Ok(opened)
 }
 
 fn open_envelope(roster: &Roster, envelope: &KeyEnvelope, key: &EncKey) -> Result<[u8; 64]> {
+    let pouch = roster
+        .pouches
+        .get(&envelope.pouch_id)
+        .filter(|pouch| (1..=pouch.key_gen).contains(&envelope.key_gen))
+        .ok_or_else(|| fork("key envelope for a generation the roster never announced"))?;
     let creator = roster
         .members
         .get(&envelope.created_by_member)
         .ok_or_else(|| CryptoError::Signature("key envelope from an unknown member".into()))?;
-    let aad = [
-        envelope.pouch_id.as_bytes(),
-        envelope.member_id.as_bytes(),
-        &envelope.key_gen.to_be_bytes(),
-    ]
-    .concat();
+    // Every removal rotates the keys: a removed member never sealed the newest.
+    if creator.removed_seq.is_some() && envelope.key_gen >= pouch.key_gen {
+        return Err(CryptoError::Signature(
+            "key envelope from a removed member".into(),
+        ));
+    }
+    let aad = envelope_aad(&envelope.pouch_id, &envelope.member_id, envelope.key_gen);
     let enc = b64::decode(&envelope.hpke_enc).ok_or(CryptoError::Format("bad envelope enc"))?;
     let ciphertext =
         b64::decode(&envelope.ciphertext).ok_or(CryptoError::Format("bad envelope ciphertext"))?;
@@ -339,6 +397,38 @@ fn open_envelope(roster: &Roster, envelope: &KeyEnvelope, key: &EncKey) -> Resul
         .as_slice()
         .try_into()
         .map_err(|_| CryptoError::Format("bad key material length"))
+}
+
+fn envelope_aad(pouch_id: &str, member_id: &str, key_gen: u32) -> Vec<u8> {
+    [
+        pouch_id.as_bytes(),
+        member_id.as_bytes(),
+        &key_gen.to_be_bytes(),
+    ]
+    .concat()
+}
+
+/// Seals `PS_g ‖ PIS` of a pouch to a member, signed by `creator`
+/// (byte-compatible with `sealKeyEnvelope` of `@skillpouch/crypto`).
+pub fn seal_key_envelope(
+    creator: (&str, &SignKey),
+    recipient: (&str, &PublicJwk),
+    pouch_id: &str,
+    key_gen: u32,
+    material: &[u8; 64],
+) -> Result<KeyEnvelope> {
+    let aad = envelope_aad(pouch_id, recipient.0, key_gen);
+    let (enc, ciphertext) = hpke::seal(recipient.1, KEY_ENVELOPE.as_bytes(), &aad, material)?;
+    let signed = [&aad[..], &enc, &ciphertext].concat();
+    Ok(KeyEnvelope {
+        pouch_id: pouch_id.to_string(),
+        member_id: recipient.0.to_string(),
+        key_gen,
+        hpke_enc: b64::encode(&enc),
+        ciphertext: b64::encode(&ciphertext),
+        created_by_member: creator.0.to_string(),
+        signature: creator.1.sign(KEY_ENVELOPE, &signed),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

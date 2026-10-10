@@ -303,6 +303,7 @@ async fn run_with(ctx: &Context, session: &mut Session, mut record: SetupRecord)
         &token,
         &session.credentials,
         &record.pouch_id,
+        &ctx.home,
     )
     .await
     .map_err(api_signed_out)?;

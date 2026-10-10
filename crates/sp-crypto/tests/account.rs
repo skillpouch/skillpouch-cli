@@ -40,7 +40,8 @@ fn reads_the_pouch_names_the_web_sealed() {
 
     let roster = verify_roster(&fixture.roster, &welcome).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(roster.head_seq, 7);
-    let keys = open_envelopes(&roster, &fixture.key_envelopes, &fixture.member_id, &key);
+    let keys = open_envelopes(&roster, &fixture.key_envelopes, &fixture.member_id, &key)
+        .unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(keys.len(), 4);
 
     let names: BTreeMap<String, String> = pouch_names(&roster, &keys)
@@ -82,7 +83,9 @@ fn ignores_envelopes_nobody_in_the_roster_signed() {
     }
     // Only the first still carries its own signature.
     assert_eq!(
-        open_envelopes(&roster, &envelopes, &fixture.member_id, &key).len(),
+        open_envelopes(&roster, &envelopes, &fixture.member_id, &key)
+            .map(|keys| keys.len())
+            .unwrap_or_default(),
         1
     );
 }

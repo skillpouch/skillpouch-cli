@@ -56,6 +56,33 @@ impl PouchState {
     }
 }
 
+/// The newest account roster this computer verified: `state/roster.json`.
+/// The server may not show it an older or a different one later.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RosterPin {
+    pub genesis_hash: String,
+    pub member_id: String,
+    pub head_seq: u64,
+    pub head_hash: String,
+}
+
+impl RosterPin {
+    fn path(home: &Home) -> PathBuf {
+        home.state_dir().join("roster.json")
+    }
+
+    pub fn load(home: &Home) -> Result<Option<Self>> {
+        Ok(read_optional(&Self::path(home))?.and_then(|bytes| serde_json::from_slice(&bytes).ok()))
+    }
+
+    pub fn save(&self, home: &Home) -> Result<()> {
+        home.ensure_private_dir(&home.state_dir())?;
+        let bytes = serde_json::to_vec_pretty(self)
+            .map_err(|error| crate::SyncError::Invalid(error.to_string()))?;
+        Ok(write_private(&Self::path(home), &bytes)?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -31,6 +31,7 @@ pub async fn pouch_names(
     )
     .map_err(|e| unreadable(&e))?;
     let roster = vault::verify_roster(&roster.statements, &welcome).map_err(|e| unreadable(&e))?;
-    let keys = vault::open_envelopes(&roster, &envelopes.key_envelopes, member_id, &key);
+    let keys = vault::open_envelopes(&roster, &envelopes.key_envelopes, member_id, &key)
+        .map_err(|e| unreadable(&e))?;
     Ok(vault::pouch_names(&roster, &keys))
 }
