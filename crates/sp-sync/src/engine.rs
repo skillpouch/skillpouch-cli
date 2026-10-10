@@ -14,6 +14,8 @@ use crate::state::{Agreed, PouchState};
 use crate::{Result, SyncError};
 use std::collections::{BTreeMap, BTreeSet};
 
+const OPS_PER_COMMIT: usize = 20;
+
 /// How the first sync of a computer settles items both sides have.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Prefer {
@@ -190,6 +192,21 @@ pub async fn sync(
     state: &mut PouchState,
     options: Options,
 ) -> Result<Outcome> {
+    sync_with_checkpoint(remote, dir, state, options, |_| Ok(())).await
+}
+
+/// Like [`sync`], checkpointing verified pins before later steps can fail and
+/// persisted agreements after successful writes.
+pub async fn sync_with_checkpoint<F>(
+    remote: &Remote<'_>,
+    dir: &PouchDir,
+    state: &mut PouchState,
+    options: Options,
+    mut checkpoint: F,
+) -> Result<Outcome>
+where
+    F: FnMut(&PouchState) -> Result<()>,
+{
     let high_water = remote.pouch.event_seq;
     let listing = remote.list().await?;
     // Progress a known artifact only along the signed primary-parent chain.
@@ -213,7 +230,6 @@ pub async fn sync(
         if let Some(pinned) = pinned
             && head.revision_id != pinned
             && head.parent_id.as_deref() != Some(pinned)
-            && !head.deleted
         {
             return Err(SyncError::Invalid(format!(
                 "cannot verify revision progression for {}: its signed parent is not the last verified head; refusing to sync this listing",
@@ -228,6 +244,8 @@ pub async fn sync(
             head.parents.iter().map(String::as_str),
         );
     }
+    state.epoch.clone_from(&remote.pouch.epoch);
+    checkpoint(state)?;
     let Listing {
         items: remote_items,
         unreadable,
@@ -284,64 +302,69 @@ pub async fn sync(
     }
 
     if !plan.send.is_empty() {
-        let results = remote.commit(&plan.send).await?;
-        for (change, result) in plan.send.iter().zip(results) {
-            let key = change.key();
-            match result {
-                Committed::Applied {
-                    artifact_id,
-                    revision_id,
-                } => {
-                    outcome.sent += 1;
-                    if plan.reupload.contains(&key) {
-                        outcome.reuploaded.push(key.clone());
+        for changes in plan.send.chunks(OPS_PER_COMMIT) {
+            let results = remote.commit(changes).await?;
+            for (change, result) in changes.iter().zip(results) {
+                let key = change.key();
+                match result {
+                    Committed::Applied {
+                        artifact_id,
+                        revision_id,
+                    } => {
+                        outcome.sent += 1;
+                        if plan.reupload.contains(&key) {
+                            outcome.reuploaded.push(key.clone());
+                        }
+                        let base = match change {
+                            Change::Create { .. } => None,
+                            Change::Update { base, .. }
+                            | Change::Restore { base, .. }
+                            | Change::Delete { base } => Some(base.revision_id.as_str()),
+                        };
+                        state.saw(&artifact_id, &revision_id, base);
+                        match change {
+                            Change::Delete { .. } => {
+                                state.items.remove(&key);
+                            }
+                            Change::Create {
+                                kind, name, files, ..
+                            } => {
+                                let fingerprint = remote.local_fingerprint(files);
+                                state.items.insert(
+                                    key,
+                                    Agreed {
+                                        artifact_id,
+                                        revision_id,
+                                        kind: kind.clone(),
+                                        name: name.clone(),
+                                        fingerprint,
+                                    },
+                                );
+                            }
+                            Change::Update { base, files } | Change::Restore { base, files } => {
+                                let fingerprint = remote.local_fingerprint(files);
+                                state.items.insert(
+                                    key,
+                                    Agreed {
+                                        artifact_id,
+                                        revision_id,
+                                        kind: base.kind.clone(),
+                                        name: base.name.clone(),
+                                        fingerprint,
+                                    },
+                                );
+                            }
+                        }
                     }
-                    let base = match change {
-                        Change::Create { .. } => None,
-                        Change::Update { base, .. }
-                        | Change::Restore { base, .. }
-                        | Change::Delete { base } => Some(base.revision_id.as_str()),
-                    };
-                    state.saw(&artifact_id, &revision_id, base);
-                    match change {
-                        Change::Delete { .. } => {
-                            state.items.remove(&key);
-                        }
-                        Change::Create {
-                            kind, name, files, ..
-                        } => {
-                            let fingerprint = remote.local_fingerprint(files);
-                            state.items.insert(
-                                key,
-                                Agreed {
-                                    artifact_id,
-                                    revision_id,
-                                    kind: kind.clone(),
-                                    name: name.clone(),
-                                    fingerprint,
-                                },
-                            );
-                        }
-                        Change::Update { base, files } | Change::Restore { base, files } => {
-                            let fingerprint = remote.local_fingerprint(files);
-                            state.items.insert(
-                                key,
-                                Agreed {
-                                    artifact_id,
-                                    revision_id,
-                                    kind: base.kind.clone(),
-                                    name: base.name.clone(),
-                                    fingerprint,
-                                },
-                            );
-                        }
+                    // Ours was stale: the server keeps it as an open conflict.
+                    Committed::Conflict if plan.conflicts.contains(&key) => outcome.conflicts += 1,
+                    Committed::Conflict => outcome.again = true,
+                    Committed::Rejected(reason) => {
+                        outcome.rejected.push(format!("{key}: {reason}"))
                     }
                 }
-                // Ours was stale: the server keeps it as an open conflict.
-                Committed::Conflict if plan.conflicts.contains(&key) => outcome.conflicts += 1,
-                Committed::Conflict => outcome.again = true,
-                Committed::Rejected(reason) => outcome.rejected.push(format!("{key}: {reason}")),
             }
+            checkpoint(state)?;
         }
     }
 
@@ -374,6 +397,7 @@ pub async fn sync(
                 .items
                 .insert(key, agreed(theirs, theirs.fingerprint()));
             outcome.received += 1;
+            checkpoint(state)?;
         }
     }
 
@@ -386,6 +410,7 @@ pub async fn sync(
         dir.remove_item(&mine.item.kind, &mine.item.name)?;
         state.items.remove(key);
         outcome.received += 1;
+        checkpoint(state)?;
     }
 
     state.epoch.clone_from(&remote.pouch.epoch);

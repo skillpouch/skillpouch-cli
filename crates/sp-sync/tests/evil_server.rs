@@ -102,6 +102,7 @@ struct World {
     artifacts: Vec<Value>,
     blobs: HashMap<String, Vec<u8>>,
     commits: usize,
+    fail_commit_on: Option<usize>,
     pouch_state: String,
 }
 
@@ -220,6 +221,12 @@ impl Respond for Evil {
             }
             ("POST", "/operations") => {
                 world.commits += 1;
+                if world.fail_commit_on == Some(world.commits) {
+                    return ResponseTemplate::new(503).set_body_json(json!({
+                        "ok": false,
+                        "error": { "code": "unavailable", "message": "injected failure", "retryable": true },
+                    }));
+                }
                 let results: Vec<Value> = body["ops"]
                     .as_array()
                     .into_iter()
@@ -1320,6 +1327,104 @@ async fn unsigned_deleted_at_does_not_delete_a_live_signed_item() -> TestResult 
     Ok(())
 }
 
+#[tokio::test]
+async fn verified_head_is_checkpointed_before_blob_download_failure() -> TestResult {
+    let h = Harness::new().await?;
+    let artifact = h.put_item(&h.device, "pdf", "# r1\n")?;
+    h.sync().await?;
+    let r1 = Harness::head_mut(&mut h.world(), &artifact).clone();
+    h.edit(
+        &h.device,
+        &artifact,
+        Edit {
+            text: "# r2\n",
+            ..Edit::default()
+        },
+    )?;
+    h.world().blobs.clear();
+
+    let key = h.device_key()?;
+    let remote = h.open(&key).await?;
+    let mut state = PouchState::load(&h.home, &h.pouch_id)?;
+    let result = engine::sync_with_checkpoint(
+        &remote,
+        &h.pouch_dir,
+        &mut state,
+        Options::default(),
+        |state| state.save(&h.home, &h.pouch_id),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "the deliberately removed blob should fail download"
+    );
+    let persisted = PouchState::load(&h.home, &h.pouch_id)?;
+    assert_eq!(
+        persisted.seen[&artifact].head,
+        Harness::head_mut(&mut h.world(), &artifact)["id"]
+    );
+
+    *Harness::head_mut(&mut h.world(), &artifact) = r1;
+    expect_rollback(h.sync().await, "skill/pdf");
+    Ok(())
+}
+
+#[tokio::test]
+async fn completed_commit_chunk_is_checkpointed_before_next_chunk_fails() -> TestResult {
+    let h = Harness::new().await?;
+    let mut artifacts = Vec::new();
+    for index in 0..21 {
+        artifacts.push(h.put_item(&h.device, &format!("item-{index:02}"), "# original\n")?);
+    }
+    h.sync().await?;
+    let initial = PouchState::load(&h.home, &h.pouch_id)?;
+    for index in 0..21 {
+        std::fs::write(
+            h.pouch_dir
+                .root()
+                .join(format!("skills/item-{index:02}/SKILL.md")),
+            "# changed\n",
+        )?;
+    }
+    {
+        let mut world = h.world();
+        world.fail_commit_on = Some(world.commits + 2);
+    }
+    let key = h.device_key()?;
+    let remote = h.open(&key).await?;
+    let mut state = PouchState::load(&h.home, &h.pouch_id)?;
+    let result = engine::sync_with_checkpoint(
+        &remote,
+        &h.pouch_dir,
+        &mut state,
+        Options::default(),
+        |state| state.save(&h.home, &h.pouch_id),
+    )
+    .await;
+    assert!(result.is_err(), "the injected second commit should fail");
+
+    let persisted = PouchState::load(&h.home, &h.pouch_id)?;
+    let world = h.world();
+    let advanced = artifacts
+        .iter()
+        .filter(|artifact| {
+            let old = &initial.seen[*artifact].head;
+            let revision = world
+                .artifacts
+                .iter()
+                .find(|item| item["id"] == **artifact)
+                .map(|item| item["head"]["id"].as_str().unwrap_or_default())
+                .unwrap_or_default();
+            revision != old && persisted.seen[*artifact].head == revision
+        })
+        .count();
+    assert_eq!(
+        advanced, 20,
+        "the first successful commit chunk must be pinned"
+    );
+    Ok(())
+}
+
 /// A deleted item whose files and history were freed: only its signed
 /// delete is left, with no blobs.
 fn purge(h: &Harness, artifact: &str, parent_link: bool) {
@@ -1348,14 +1453,13 @@ async fn purged_item_is_removed_by_a_long_offline_computer(parent_link: bool) ->
     h.edit(&h.device, &artifact, edit("# PDF v2\n", true))?;
     purge(&h, &artifact, parent_link);
 
-    let outcome = h.sync().await?;
-    assert_eq!(h.skill_on_disk("pdf"), None, "the signed delete wins");
+    match h.sync().await {
+        Err(SyncError::Invalid(message)) => assert!(message.contains("signed parent")),
+        other => panic!("unverifiable skipped tombstone ancestry must be refused: {other:?}"),
+    }
+    assert_eq!(h.skill_on_disk("pdf").as_deref(), Some("# PDF\n"));
     assert_eq!(h.skill_on_disk("kept").as_deref(), Some("# Kept\n"));
-    assert_eq!((outcome.unreadable, outcome.received), (0, 1));
-    assert!(outcome.reuploaded.is_empty());
-    assert_eq!(h.world().commits, 0, "sent the deleted item back");
-    let world = h.world();
-    assert_eq!(world.artifacts.len(), 2, "resurrected under a new id");
+    assert_eq!(h.world().commits, 0);
     Ok(())
 }
 
@@ -1431,6 +1535,126 @@ async fn the_live_head_of_a_deleted_item_replayed_is_refused() -> TestResult {
     }
     expect_rollback(h.sync().await, "skill/pdf");
     assert_eq!(h.skill_on_disk("pdf"), None, "brought a deleted item back");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unseen_old_tombstone_cannot_skip_a_pinned_live_head() -> TestResult {
+    let h = Harness::new().await?;
+    let artifact = h.put_item(&h.device, "pdf", "# r1\n")?;
+    h.edit(
+        &h.device,
+        &artifact,
+        Edit {
+            text: "# r1\n",
+            deleted: true,
+            ..Edit::default()
+        },
+    )?;
+    let r1_tombstone = Harness::head_mut(&mut h.world(), &artifact).clone();
+    h.edit(
+        &h.device,
+        &artifact,
+        Edit {
+            text: "# r2\n",
+            ..Edit::default()
+        },
+    )?;
+    h.edit(
+        &h.device,
+        &artifact,
+        Edit {
+            text: "# r3\n",
+            ..Edit::default()
+        },
+    )?;
+    h.edit(
+        &h.device,
+        &artifact,
+        Edit {
+            text: "# r4\n",
+            ..Edit::default()
+        },
+    )?;
+    h.sync().await?;
+    assert_eq!(h.skill_on_disk("pdf").as_deref(), Some("# r4\n"));
+
+    *Harness::head_mut(&mut h.world(), &artifact) = r1_tombstone;
+    match h.sync().await {
+        Err(SyncError::Invalid(message)) => assert!(message.contains("signed parent")),
+        other => panic!("expected refusal of skipped tombstone ancestry, got {other:?}"),
+    }
+    assert_eq!(h.skill_on_disk("pdf").as_deref(), Some("# r4\n"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_signed_fork_off_the_pinned_head_is_refused() -> TestResult {
+    let h = Harness::new().await?;
+    let artifact = h.put_item(&h.device, "pdf", "# r1\n")?;
+    h.sync().await?;
+    let r1 = Harness::head_mut(&mut h.world(), &artifact).clone();
+    let r1_id = r1["id"].as_str().ok_or("missing r1 id")?.to_string();
+    h.edit(
+        &h.device,
+        &artifact,
+        Edit {
+            text: "# r2\n",
+            ..Edit::default()
+        },
+    )?;
+    h.sync().await?;
+
+    let fork = h.revision(
+        &h.device,
+        Revision {
+            artifact_id: &artifact,
+            parent: Some(&r1_id),
+            name: "pdf",
+            text: "# fork\n",
+            ..Revision::default()
+        },
+    )?;
+    *Harness::head_mut(&mut h.world(), &artifact) = fork;
+    match h.sync().await {
+        Err(SyncError::Invalid(message)) => assert!(message.contains("signed parent")),
+        other => panic!("expected refusal of signed fork, got {other:?}"),
+    }
+    assert_eq!(h.skill_on_disk("pdf").as_deref(), Some("# r2\n"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_new_tombstone_after_epoch_restart_is_accepted() -> TestResult {
+    let h = Harness::new().await?;
+    let artifact = h.put_item(&h.device, "pdf", "# r1\n")?;
+    h.sync().await?;
+    for text in ["# r2\n", "# r3\n", "# r4\n"] {
+        h.edit(
+            &h.device,
+            &artifact,
+            Edit {
+                text,
+                ..Edit::default()
+            },
+        )?;
+        h.sync().await?;
+    }
+    let mut state = PouchState::load(&h.home, &h.pouch_id)?;
+    state.restart();
+    state.save(&h.home, &h.pouch_id)?;
+    h.edit(
+        &h.device,
+        &artifact,
+        Edit {
+            text: "# r4\n",
+            deleted: true,
+            ..Edit::default()
+        },
+    )?;
+    let outcome = h.sync().await?;
+    assert_eq!(outcome.received, 1);
+    assert_eq!(h.skill_on_disk("pdf"), None);
     Ok(())
 }
 

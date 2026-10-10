@@ -423,7 +423,7 @@ async fn run_with(ctx: &Context, session: &mut Session, mut record: SetupRecord)
         state.restart();
     }
     for round in 0..ROUNDS {
-        let outcome = engine::sync(
+        let outcome = engine::sync_with_checkpoint(
             &remote,
             &dir,
             &mut state,
@@ -432,6 +432,7 @@ async fn run_with(ctx: &Context, session: &mut Session, mut record: SetupRecord)
             } else {
                 Options::default()
             },
+            |state| state.save(&ctx.home, &record.pouch_id),
         )
         .await
         .map_err(api_signed_out)?;

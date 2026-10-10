@@ -63,7 +63,6 @@ pub struct Head {
     pub artifact_id: String,
     pub revision_id: String,
     pub parent_id: Option<String>,
-    pub deleted: bool,
     /// Parent and merge parent, as the signed body names them.
     pub parents: Vec<String>,
     /// `kind/name`, for messages.
@@ -262,7 +261,6 @@ impl<'a> Remote<'a> {
                     artifact_id: body.artifact_id.clone(),
                     revision_id: body.revision_id.clone(),
                     parent_id: body.parent_id.clone(),
-                    deleted: body.deleted,
                     parents: body
                         .parent_id
                         .iter()
