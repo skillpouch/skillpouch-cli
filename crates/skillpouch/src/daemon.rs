@@ -152,6 +152,12 @@ pub fn describe_report(report: &Report) -> String {
             report.removed.join(", ")
         ));
     }
+    if !report.reuploaded.is_empty() {
+        parts.push(format!(
+            "sent back (missing on the server, never deleted): {}",
+            report.reuploaded.join(", ")
+        ));
+    }
     if !report.backed_up.is_empty() {
         parts.push(format!("{} moved to backups", report.backed_up.len()));
     }

@@ -49,6 +49,12 @@ pub async fn once(ctx: &Context) -> Result<ExitCode> {
             report.removed.join(", ")
         ));
     }
+    if !report.reuploaded.is_empty() {
+        ui::warn(format!(
+            "The server no longer had these, though nobody deleted them; sent again from this computer: {}",
+            report.reuploaded.join(", ")
+        ));
+    }
     if !report.backed_up.is_empty() {
         ui::hint(format!(
             "{} file(s) the pouch replaced were moved to {}",

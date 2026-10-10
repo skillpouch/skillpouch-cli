@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use sp_api::Client;
 use sp_core::canonical::canonical_json;
 use sp_core::{Credentials, Home};
-use sp_crypto::pouch::{ManifestEntry, PouchKeys, RevisionBody};
+use sp_crypto::pouch::{ManifestEntry, PouchKeys, RevisionBody, RevisionColumns};
 use sp_crypto::vault::{
     self, KeyEnvelope, RosterStatement, open_envelopes, open_welcome, verify_roster,
 };
@@ -23,7 +23,26 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+/// A revision for the test to seal.
+#[derive(Default)]
+struct Revision<'a> {
+    artifact_id: &'a str,
+    parent: Option<&'a str>,
+    merge_parent: Option<&'a str>,
+    name: &'a str,
+    text: &'a str,
+    deleted: bool,
+}
+
+/// A new head on top of an item's current one.
+#[derive(Default)]
+struct Edit<'a> {
+    text: &'a str,
+    deleted: bool,
+    merge_parent: Option<&'a str>,
+}
 
 const ROSTER: &str = "skillpouch/v1/roster";
 const REVISION: &str = "skillpouch/v1/revision";
@@ -83,6 +102,56 @@ struct World {
     artifacts: Vec<Value>,
     blobs: HashMap<String, Vec<u8>>,
     commits: usize,
+    pouch_state: String,
+}
+
+const NOW: &str = "2026-10-09T00:00:00.000Z";
+
+impl World {
+    /// Applies one operation the way the API does: the head moves only from
+    /// the base the operation names.
+    fn apply(&mut self, op: &Value) -> Value {
+        let head = json!({
+            "id": op["revision_id"], "artifact_id": op["artifact_id"],
+            "parent_id": op["base_revision_id"], "envelope": op["envelope"],
+            "signature": op["signature"], "signer_member_id": op["signer_member_id"],
+            "key_gen": op["key_gen"], "blob_ids": op["blob_ids"], "created_at": NOW,
+        });
+        let applied = json!({
+            "status": "applied", "artifact_id": op["artifact_id"],
+            "revision_id": op["revision_id"], "seq": 1,
+        });
+        if op["type"] == "create" {
+            self.artifacts.push(json!({
+                "id": op["artifact_id"], "deleted_at": null, "updated_at": NOW, "head": head,
+            }));
+            return applied;
+        }
+        let Some(artifact) = self
+            .artifacts
+            .iter_mut()
+            .find(|a| a["id"] == op["artifact_id"])
+        else {
+            return json!({
+                "status": "rejected", "artifact_id": op["artifact_id"],
+                "code": "not_found", "message": "artifact not found in this pouch",
+            });
+        };
+        if artifact["head"]["id"] != op["base_revision_id"] {
+            return json!({
+                "status": "conflict", "artifact_id": op["artifact_id"],
+                "revision_id": op["revision_id"], "conflict_type": "update_update",
+                "server_revision_id": artifact["head"]["id"], "seq": 1,
+            });
+        }
+        artifact["head"] = head;
+        artifact["deleted_at"] = if op["type"] == "delete" {
+            json!(NOW)
+        } else {
+            Value::Null
+        };
+        applied
+    }
 }
 
 #[derive(Clone)]
@@ -98,9 +167,10 @@ impl Respond for Evil {
         let pouch = format!("/v1/pouches/{}", world.pouch_id);
         let path = request.url.path().to_string();
         let route = path.strip_prefix(&pouch).unwrap_or(&path);
+        let body = serde_json::from_slice::<Value>(&request.body).unwrap_or_default();
         match (request.method.as_str(), route) {
             ("GET", "/v1/pouches") => ok(json!({ "pouches": [{
-                "id": world.pouch_id, "state": "active", "event_seq": 1, "created_seq": 1,
+                "id": world.pouch_id, "state": world.pouch_state, "event_seq": 1, "created_seq": 1,
                 "delete_after": null, "created_at": "2026-10-08T23:50:03.745Z",
                 "epoch": "e1", "key_gen": world.pouch_key_gen,
             }]})),
@@ -127,13 +197,36 @@ impl Respond for Evil {
                     .insert_header("Content-Type", "application/octet-stream")
                     .set_body_bytes(framed)
             }
-            ("POST", "/blobs/check") => ok(json!({ "missing": [] })),
+            ("POST", "/blobs/check") => {
+                let missing: Vec<&Value> = body["blobs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|blob| &blob["id"])
+                    .filter(|id| !world.blobs.contains_key(id.as_str().unwrap_or_default()))
+                    .collect();
+                ok(json!({ "missing": missing }))
+            }
+            ("POST", "/blobs/batch") => {
+                // `id(32) ‖ hash(32) ‖ u32_be(len) ‖ bytes`, repeated.
+                let mut rest: &[u8] = &request.body;
+                while rest.len() >= 68 {
+                    let len = u32::from_be_bytes([rest[64], rest[65], rest[66], rest[67]]) as usize;
+                    let id = b64::encode(&rest[..32]);
+                    world.blobs.insert(id, rest[68..68 + len].to_vec());
+                    rest = &rest[68 + len..];
+                }
+                ok(json!({}))
+            }
             ("POST", "/operations") => {
                 world.commits += 1;
-                ResponseTemplate::new(500).set_body_json(json!({
-                    "ok": false,
-                    "error": { "code": "internal_error", "message": "not in this test", "retryable": false },
-                }))
+                let results: Vec<Value> = body["ops"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|op| world.apply(op))
+                    .collect();
+                ok(json!({ "results": results, "high_water": 1 }))
             }
             _ => ResponseTemplate::new(404).set_body_json(json!({
                 "ok": false,
@@ -185,6 +278,7 @@ impl Harness {
             pouch_key_gen: keys.key_gen(),
             roster: fixture.roster.clone(),
             envelopes: fixture.key_envelopes.clone(),
+            pouch_state: "active".into(),
             ..World::default()
         }));
         let server = MockServer::start().await;
@@ -305,20 +399,20 @@ impl Harness {
         Ok(())
     }
 
-    /// An item whose head is sealed and signed like a real client would.
-    fn put_item(&self, author: &Signer, name: &str, text: &str) -> Result<String, CryptoError> {
-        let blob = self.keys.seal_blob(text.as_bytes())?;
-        let artifact_id = uuid::Uuid::new_v4().to_string();
+    /// A revision sealed and signed like a real client would, its blob
+    /// stored; returned as the API lists a head.
+    fn revision(&self, author: &Signer, of: Revision<'_>) -> Result<Value, CryptoError> {
+        let blob = self.keys.seal_blob(of.text.as_bytes())?;
         let body = RevisionBody {
             format: 1,
-            artifact_id: artifact_id.clone(),
+            artifact_id: of.artifact_id.into(),
             revision_id: uuid::Uuid::new_v4().to_string(),
-            parent_id: None,
-            merge_parent_id: None,
+            parent_id: of.parent.map(str::to_string),
+            merge_parent_id: of.merge_parent.map(str::to_string),
             kind: "skill".into(),
             scope: "global".into(),
-            logical_key: name.into(),
-            deleted: false,
+            logical_key: of.name.into(),
+            deleted: of.deleted,
             entries: vec![ManifestEntry {
                 path: "SKILL.md".into(),
                 blob: blob.id.clone(),
@@ -327,28 +421,105 @@ impl Harness {
             }],
             roster_head: self.head_hash(),
             author_member_id: author.id.clone(),
-            created_at: "2026-10-09T00:00:00.000Z".into(),
+            created_at: NOW.into(),
         };
         let revision = self.keys.seal_revision(&author.sign, &body)?;
-        let mut world = self.world();
-        world.blobs.insert(blob.id.clone(), blob.bytes);
-        world.artifacts.push(json!({
+        self.world().blobs.insert(blob.id.clone(), blob.bytes);
+        Ok(json!({
+            "id": body.revision_id,
+            "artifact_id": of.artifact_id,
+            "parent_id": of.parent,
+            "merge_parent_id": of.merge_parent,
+            "envelope": revision.envelope,
+            "signature": revision.signature,
+            "signer_member_id": author.id,
+            "key_gen": revision.key_gen,
+            "blob_ids": [blob.id],
+            "created_at": NOW,
+        }))
+    }
+
+    /// An item whose head is sealed and signed like a real client would.
+    fn put_item(&self, author: &Signer, name: &str, text: &str) -> Result<String, CryptoError> {
+        let artifact_id = uuid::Uuid::new_v4().to_string();
+        let head = self.revision(
+            author,
+            Revision {
+                artifact_id: &artifact_id,
+                name,
+                text,
+                ..Revision::default()
+            },
+        )?;
+        self.world().artifacts.push(json!({
             "id": artifact_id,
             "deleted_at": null,
-            "updated_at": "2026-10-09T00:00:00.000Z",
-            "head": {
-                "id": body.revision_id,
-                "artifact_id": artifact_id,
-                "parent_id": null,
-                "envelope": revision.envelope,
-                "signature": revision.signature,
-                "signer_member_id": author.id,
-                "key_gen": revision.key_gen,
-                "blob_ids": [blob.id],
-                "created_at": "2026-10-09T00:00:00.000Z",
-            },
+            "updated_at": NOW,
+            "head": head,
         }));
         Ok(artifact_id)
+    }
+
+    /// Someone moves the item to a new head on top of the current one, as
+    /// the API would after a signed write; returns the replaced head.
+    fn edit(&self, author: &Signer, artifact_id: &str, edit: Edit<'_>) -> TestResult<Value> {
+        let current = Harness::head_mut(&mut self.world(), artifact_id).clone();
+        let parent = current["id"].as_str().unwrap_or_default().to_string();
+        let name = self.name_of(&current)?;
+        let head = self.revision(
+            author,
+            Revision {
+                artifact_id,
+                parent: Some(&parent),
+                merge_parent: edit.merge_parent,
+                name: &name,
+                text: edit.text,
+                deleted: edit.deleted,
+            },
+        )?;
+        let mut world = self.world();
+        let artifact = world
+            .artifacts
+            .iter_mut()
+            .find(|a| a["id"] == artifact_id)
+            .ok_or("no artifact")?;
+        artifact["head"] = head;
+        artifact["deleted_at"] = if edit.deleted {
+            json!(NOW)
+        } else {
+            Value::Null
+        };
+        Ok(current)
+    }
+
+    /// The decrypted body of a head as listed.
+    fn open_listed(&self, head: &Value) -> TestResult<RevisionBody> {
+        let text = |field: &str| head[field].as_str().unwrap_or_default().to_string();
+        let signer = text("signer_member_id");
+        let welcome = open_welcome(&self.device.enc, &self.device.id, &self.credentials.welcome)?;
+        let roster = verify_roster(&self.world().roster, &welcome)?;
+        let sign_pub = roster
+            .members
+            .get(&signer)
+            .ok_or("unknown signer")?
+            .sign_pub
+            .clone();
+        let parent = head["parent_id"].as_str();
+        Ok(self.keys.open_revision(
+            &RevisionColumns {
+                artifact_id: &text("artifact_id"),
+                revision_id: &text("id"),
+                parent_id: parent,
+                envelope: &text("envelope"),
+                signature: &text("signature"),
+                signer_member_id: &signer,
+            },
+            &sign_pub,
+        )?)
+    }
+
+    fn name_of(&self, head: &Value) -> TestResult<String> {
+        Ok(self.open_listed(head)?.logical_key)
     }
 
     fn head_mut<'w>(world: &'w mut World, artifact_id: &str) -> &'w mut Value {
@@ -1066,6 +1237,250 @@ async fn a_revision_signed_with_a_context_for_something_else_is_refused() -> Tes
         head["signature"] = json!(h.device.sign.sign(REVISION, &message));
     })
     .await
+}
+
+// ---- missing items and older heads ---------------------------------------------------
+
+fn expect_rollback(result: SyncResult<engine::Outcome>, key: &str) {
+    match result {
+        Err(SyncError::Rollback(which)) => assert_eq!(which, key),
+        other => panic!("expected a refused rollback of {key}, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_item_missing_from_the_listing_is_sent_back_not_deleted() -> TestResult {
+    let h = Harness::new().await?;
+    let artifact = h.put_item(&h.device, "pdf", "# PDF\n")?;
+    h.sync().await?;
+    // The server lost it (a restored backup, a replica behind) or hides it.
+    h.world().artifacts.retain(|a| a["id"] != artifact);
+
+    let outcome = h.sync().await?;
+    assert_eq!(outcome.reuploaded, ["skill/pdf"]);
+    assert_eq!((outcome.sent, outcome.received), (1, 0));
+    assert_eq!(h.skill_on_disk("pdf").as_deref(), Some("# PDF\n"));
+    // Sent as a new, properly signed item with the same files.
+    let head = {
+        let world = h.world();
+        assert_eq!(world.artifacts.len(), 1);
+        world.artifacts[0]["head"].clone()
+    };
+    let body = h.open_listed(&head)?;
+    assert_eq!((body.logical_key.as_str(), body.deleted), ("pdf", false));
+    assert_ne!(body.artifact_id, artifact);
+
+    let again = h.sync().await?;
+    assert_eq!((again.sent, again.received), (0, 0), "settled");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_item_with_a_signed_delete_is_removed() -> TestResult {
+    let h = Harness::new().await?;
+    let other = Signer::generate()?;
+    h.add_member(&other, "device")?;
+    let artifact = h.put_item(&h.device, "pdf", "# PDF\n")?;
+    h.sync().await?;
+    h.edit(
+        &other,
+        &artifact,
+        Edit {
+            text: "# PDF\n",
+            deleted: true,
+            ..Edit::default()
+        },
+    )?;
+
+    let outcome = h.sync().await?;
+    assert_eq!((outcome.sent, outcome.received), (0, 1));
+    assert_eq!(h.skill_on_disk("pdf"), None);
+    assert!(outcome.reuploaded.is_empty());
+    assert_eq!(h.world().commits, 0);
+    Ok(())
+}
+
+/// A deleted item whose files and history were freed: only its signed
+/// delete is left, with no blobs.
+fn purge(h: &Harness, artifact: &str, parent_link: bool) {
+    let mut world = h.world();
+    let head = Harness::head_mut(&mut world, artifact);
+    head["blob_ids"] = json!([]);
+    if !parent_link {
+        // Servers before the link was kept emptied it when the parent went.
+        head["parent_id"] = Value::Null;
+    }
+    world.blobs.clear();
+}
+
+async fn purged_item_is_removed_by_a_long_offline_computer(parent_link: bool) -> TestResult {
+    let h = Harness::new().await?;
+    let artifact = h.put_item(&h.device, "pdf", "# PDF\n")?;
+    h.put_item(&h.device, "kept", "# Kept\n")?;
+    h.sync().await?;
+    // While this computer is away: edited elsewhere, deleted, then freed.
+    let edit = |text, deleted| Edit {
+        text,
+        deleted,
+        ..Edit::default()
+    };
+    h.edit(&h.device, &artifact, edit("# PDF v2\n", false))?;
+    h.edit(&h.device, &artifact, edit("# PDF v2\n", true))?;
+    purge(&h, &artifact, parent_link);
+
+    let outcome = h.sync().await?;
+    assert_eq!(h.skill_on_disk("pdf"), None, "the signed delete wins");
+    assert_eq!(h.skill_on_disk("kept").as_deref(), Some("# Kept\n"));
+    assert_eq!((outcome.unreadable, outcome.received), (0, 1));
+    assert!(outcome.reuploaded.is_empty());
+    assert_eq!(h.world().commits, 0, "sent the deleted item back");
+    let world = h.world();
+    assert_eq!(world.artifacts.len(), 2, "resurrected under a new id");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_purged_item_keeps_its_tombstone_and_is_not_resurrected() -> TestResult {
+    purged_item_is_removed_by_a_long_offline_computer(true).await
+}
+
+#[tokio::test]
+async fn a_tombstone_whose_pruned_parent_link_is_empty_still_counts() -> TestResult {
+    purged_item_is_removed_by_a_long_offline_computer(false).await
+}
+
+#[tokio::test]
+async fn an_older_head_replayed_is_refused() -> TestResult {
+    let h = Harness::new().await?;
+    let artifact = h.put_item(&h.device, "pdf", "# v1\n")?;
+    h.sync().await?;
+    let v1 = h.edit(
+        &h.device,
+        &artifact,
+        Edit {
+            text: "# v2\n",
+            ..Edit::default()
+        },
+    )?;
+    h.sync().await?;
+    assert_eq!(h.skill_on_disk("pdf").as_deref(), Some("# v2\n"));
+    let agreed = PouchState::load(&h.home, &h.pouch_id)?.items["skill/pdf"].clone();
+
+    // The server serves version 1 again, validly signed as it once was.
+    *Harness::head_mut(&mut h.world(), &artifact) = v1;
+    expect_rollback(h.sync().await, "skill/pdf");
+    assert_eq!(h.skill_on_disk("pdf").as_deref(), Some("# v2\n"));
+    assert_eq!(h.world().commits, 0);
+    let state = PouchState::load(&h.home, &h.pouch_id)?;
+    assert_eq!(state.items["skill/pdf"], agreed, "state moved back");
+
+    // Not even when the pouch's history looks rewritten.
+    let mut state = PouchState::load(&h.home, &h.pouch_id)?;
+    state.restart();
+    state.save(&h.home, &h.pouch_id)?;
+    expect_rollback(h.sync().await, "skill/pdf");
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_live_head_of_a_deleted_item_replayed_is_refused() -> TestResult {
+    let h = Harness::new().await?;
+    let artifact = h.put_item(&h.device, "pdf", "# PDF\n")?;
+    h.sync().await?;
+    let live = h.edit(
+        &h.device,
+        &artifact,
+        Edit {
+            text: "# PDF\n",
+            deleted: true,
+            ..Edit::default()
+        },
+    )?;
+    h.sync().await?;
+    assert_eq!(h.skill_on_disk("pdf"), None);
+
+    {
+        let mut world = h.world();
+        let listed = world
+            .artifacts
+            .iter_mut()
+            .find(|a| a["id"] == artifact)
+            .ok_or("no artifact")?;
+        listed["head"] = live;
+        listed["deleted_at"] = Value::Null;
+    }
+    expect_rollback(h.sync().await, "skill/pdf");
+    assert_eq!(h.skill_on_disk("pdf"), None, "brought a deleted item back");
+    Ok(())
+}
+
+#[tokio::test]
+async fn honest_history_keeps_syncing() -> TestResult {
+    let h = Harness::new().await?;
+    let other = Signer::generate()?;
+    h.add_member(&other, "device")?;
+    let artifact = h.put_item(&h.device, "pdf", "# v1\n")?;
+    h.sync().await?;
+    let edit = |text| Edit {
+        text,
+        ..Edit::default()
+    };
+    h.edit(&other, &artifact, edit("# v2\n"))?;
+    h.sync().await?;
+    // Restoring version 1 on purpose is a new revision with the old files.
+    h.edit(&other, &artifact, edit("# v1\n"))?;
+    h.sync().await?;
+    assert_eq!(h.skill_on_disk("pdf").as_deref(), Some("# v1\n"));
+
+    // This computer's own edit, then a conflict resolved with a merge.
+    std::fs::write(
+        h.pouch_dir.root().join("skills/pdf/SKILL.md"),
+        "# v3, from here\n",
+    )?;
+    assert_eq!(h.sync().await?.sent, 1);
+    let ours = Harness::head_mut(&mut h.world(), &artifact)["id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let theirs = uuid::Uuid::new_v4().to_string();
+    h.edit(
+        &other,
+        &artifact,
+        Edit {
+            text: "# merged\n",
+            merge_parent: Some(&theirs),
+            ..Edit::default()
+        },
+    )?;
+    let outcome = h.sync().await?;
+    assert_eq!((outcome.sent, outcome.received), (0, 1));
+    assert_eq!(h.skill_on_disk("pdf").as_deref(), Some("# merged\n"));
+    let seen = &PouchState::load(&h.home, &h.pouch_id)?.seen[&artifact];
+    assert!(seen.older.contains(&ours) && seen.older.contains(&theirs));
+
+    // A new computer starts from whatever the server has.
+    std::fs::remove_dir_all(h.pouch_dir.root())?;
+    std::fs::remove_dir_all(h.home.state_dir().join("sync"))?;
+    let outcome = h.sync().await?;
+    assert_eq!(outcome.received, 1);
+    assert_eq!(h.skill_on_disk("pdf").as_deref(), Some("# merged\n"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_deleted_pouch_is_left_alone() -> TestResult {
+    let h = Harness::new().await?;
+    h.put_item(&h.device, "pdf", "# PDF\n")?;
+    h.sync().await?;
+    {
+        let mut world = h.world();
+        world.pouch_state = "deleted".into();
+        world.artifacts.clear();
+    }
+    assert!(matches!(h.sync().await, Err(SyncError::PouchDeleted)));
+    assert_eq!(h.skill_on_disk("pdf").as_deref(), Some("# PDF\n"));
+    assert_eq!(h.world().commits, 0, "wrote into a deleted pouch");
+    Ok(())
 }
 
 #[test]

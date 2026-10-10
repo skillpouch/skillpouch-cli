@@ -57,6 +57,28 @@ impl RemoteItem {
     }
 }
 
+/// A verified head revision of any item, synced here or not.
+#[derive(Debug, Clone)]
+pub struct Head {
+    pub artifact_id: String,
+    pub revision_id: String,
+    /// Parent and merge parent, as the signed body names them.
+    pub parents: Vec<String>,
+    /// `kind/name`, for messages.
+    pub key: String,
+}
+
+/// The pouch's items as the server lists them.
+#[derive(Debug, Default)]
+pub struct Listing {
+    /// Global items, deleted ones included, by key.
+    pub items: BTreeMap<String, RemoteItem>,
+    /// Every head that verified.
+    pub heads: Vec<Head>,
+    /// Artifacts whose head doesn't verify: listed by id, never trusted.
+    pub unreadable: BTreeSet<String>,
+}
+
 /// Identifies a set of files by path, content id and exec bit: equal on
 /// both sides means nothing to sync.
 pub fn fingerprint<'a>(files: impl Iterator<Item = (&'a str, &'a str, bool)>) -> String {
@@ -157,11 +179,13 @@ impl<'a> Remote<'a> {
         let pouches = client.pouches(key, token).await;
         let roster = client.roster(key, token).await;
         let envelopes = client.key_envelopes(key, token).await;
+        // A deleted pouch is neither written into nor taken off this
+        // computer: its items there stay as they are.
         let pouch = pouches?
             .pouches
             .into_iter()
-            .find(|pouch| pouch.id == pouch_id)
-            .ok_or_else(|| SyncError::Invalid("the pouch this computer syncs is gone".into()))?;
+            .find(|pouch| pouch.id == pouch_id && pouch.state != "deleted")
+            .ok_or(SyncError::PouchDeleted)?;
         let roster = vault::verify_roster(&roster?.statements, &trusted)?;
         if pinned
             .as_ref()
@@ -214,11 +238,9 @@ impl<'a> Remote<'a> {
         &self.keys
     }
 
-    /// Every global item, deleted ones included, by key. Items this computer
-    /// can't verify are returned by artifact id, never trusted.
-    pub async fn list(&self) -> Result<(BTreeMap<String, RemoteItem>, BTreeSet<String>)> {
-        let mut items: BTreeMap<String, RemoteItem> = BTreeMap::new();
-        let mut unreadable = BTreeSet::new();
+    /// Every item's head, deleted ones included.
+    pub async fn list(&self) -> Result<Listing> {
+        let mut listing = Listing::default();
         let mut cursor: Option<String> = None;
         loop {
             let (page, next) = self
@@ -227,18 +249,44 @@ impl<'a> Remote<'a> {
                 .await?;
             for artifact in page {
                 let Some(head) = artifact.head else { continue };
-                match self.open_head(&head, artifact.deleted_at.is_some()) {
-                    Ok(Some(item)) => {
-                        let key = item.key();
-                        // A live item beats a deleted one with the same name.
-                        if items.get(&key).is_none_or(|existing| existing.deleted) {
-                            items.insert(key, item);
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        unreadable.insert(artifact.id);
-                    }
+                let Ok(body) = self.open_head(&head) else {
+                    listing.unreadable.insert(artifact.id);
+                    continue;
+                };
+                listing.heads.push(Head {
+                    artifact_id: body.artifact_id.clone(),
+                    revision_id: body.revision_id.clone(),
+                    parents: body
+                        .parent_id
+                        .iter()
+                        .chain(&body.merge_parent_id)
+                        .cloned()
+                        .collect(),
+                    key: item::key(&body.kind, &body.logical_key),
+                });
+                if body.scope != GLOBAL
+                    || item::folder_of(&body.kind).is_none()
+                    || !item::valid_name(&body.logical_key)
+                {
+                    continue;
+                }
+                let item = RemoteItem {
+                    artifact_id: body.artifact_id.clone(),
+                    revision_id: body.revision_id.clone(),
+                    kind: body.kind.clone(),
+                    name: body.logical_key.clone(),
+                    entries: body.entries.clone(),
+                    deleted: artifact.deleted_at.is_some() || body.deleted,
+                    body,
+                };
+                let key = item.key();
+                // A live item beats a deleted one with the same name.
+                if listing
+                    .items
+                    .get(&key)
+                    .is_none_or(|existing| existing.deleted)
+                {
+                    listing.items.insert(key, item);
                 }
             }
             match next {
@@ -246,10 +294,11 @@ impl<'a> Remote<'a> {
                 None => break,
             }
         }
-        Ok((items, unreadable))
+        Ok(listing)
     }
 
-    fn open_head(&self, head: &RevisionRecord, deleted: bool) -> Result<Option<RemoteItem>> {
+    /// Verifies a head revision and opens its body.
+    fn open_head(&self, head: &RevisionRecord) -> Result<RevisionBody> {
         let signer = self
             .roster
             .members
@@ -275,21 +324,7 @@ impl<'a> Remote<'a> {
             )
             .into());
         }
-        if body.scope != GLOBAL
-            || item::folder_of(&body.kind).is_none()
-            || !item::valid_name(&body.logical_key)
-        {
-            return Ok(None);
-        }
-        Ok(Some(RemoteItem {
-            artifact_id: body.artifact_id.clone(),
-            revision_id: body.revision_id.clone(),
-            kind: body.kind.clone(),
-            name: body.logical_key.clone(),
-            entries: body.entries.clone(),
-            deleted: deleted || body.deleted,
-            body,
-        }))
+        Ok(body)
     }
 
     /// The files of these items, downloaded and decrypted, by artifact id.

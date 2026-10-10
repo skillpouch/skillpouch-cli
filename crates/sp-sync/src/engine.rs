@@ -8,10 +8,10 @@
 //! Items two sides bring the first time they meet have no common version;
 //! this computer's is kept as `<name>-conflict` then. Nothing is ever lost.
 
-use crate::Result;
 use crate::item::{self, Files, LocalItem, PouchDir, Skipped};
-use crate::remote::{Change, Committed, Remote, RemoteItem};
+use crate::remote::{Change, Committed, Listing, Remote, RemoteItem};
 use crate::state::{Agreed, PouchState};
+use crate::{Result, SyncError};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// How the first sync of a computer settles items both sides have.
@@ -42,6 +42,9 @@ pub struct Outcome {
     pub rejected: Vec<String>,
     /// Items on the server this computer can't verify or decrypt.
     pub unreadable: usize,
+    /// Items synced before that the server no longer had (and nobody
+    /// deleted): sent again from this computer, by key.
+    pub reuploaded: Vec<String>,
     pub skipped: Skipped,
     /// Something changed meanwhile: run again.
     pub again: bool,
@@ -55,6 +58,9 @@ pub struct Plan {
     pub receive: Vec<String>,
     /// Folder items the server deleted.
     pub remove: Vec<String>,
+    /// Items synced before that the server no longer has, without a signed
+    /// delete: sent again (their `Create` is in `send`).
+    pub reupload: Vec<String>,
     /// Both sides changed since they agreed: the folder gets the server's,
     /// and the local one goes to the server as a conflict (in `send`).
     pub conflicts: Vec<String>,
@@ -124,23 +130,30 @@ pub fn plan(
                     None => plan.copies.push(key.clone()),
                 }
             }
-            (Some(mine), None) => {
-                // Deleted (or purged) on the server, untouched here.
-                if agreed.is_some_and(|a| a.fingerprint == mine.fingerprint) {
+            (Some(mine), None) => match theirs {
+                // Deleted on the server (a signed delete), untouched here.
+                Some(_) if agreed.is_some_and(|a| a.fingerprint == mine.fingerprint) => {
                     plan.remove.push(key.clone());
-                } else if let Some(base) = theirs {
-                    plan.send.push(Change::Restore {
-                        base: base.clone(),
-                        files: mine.item.files.clone(),
-                    });
-                } else {
+                }
+                Some(base) => plan.send.push(Change::Restore {
+                    base: base.clone(),
+                    files: mine.item.files.clone(),
+                }),
+                // Not on the server at all, and nobody signed its deletion:
+                // a server restored from a backup, a replica behind, or one
+                // hiding it. Only a signed delete removes an item here, so
+                // this computer sends its copy back.
+                None => {
+                    if agreed.is_some() {
+                        plan.reupload.push(key.clone());
+                    }
                     plan.send.push(Change::Create {
                         kind: mine.item.kind.clone(),
                         name: mine.item.name.clone(),
                         files: mine.item.files.clone(),
                     });
                 }
-            }
+            },
             (None, Some(theirs)) => {
                 let deleted_here = agreed.is_some_and(|a| a.revision_id == theirs.revision_id);
                 let first_meeting = agreed.is_none() && options.delete_unmatched;
@@ -177,7 +190,28 @@ pub async fn sync(
     options: Options,
 ) -> Result<Outcome> {
     let high_water = remote.pouch.event_seq;
-    let (remote_items, unreadable) = remote.list().await?;
+    let listing = remote.list().await?;
+    // An older head than one seen before is a server replaying the past:
+    // nothing of this listing is trusted, nothing here changes.
+    if let Some(head) = listing
+        .heads
+        .iter()
+        .find(|head| state.is_rollback(&head.artifact_id, &head.revision_id))
+    {
+        return Err(SyncError::Rollback(head.key.clone()));
+    }
+    for head in &listing.heads {
+        state.saw(
+            &head.artifact_id,
+            &head.revision_id,
+            head.parents.iter().map(String::as_str),
+        );
+    }
+    let Listing {
+        items: remote_items,
+        unreadable,
+        ..
+    } = listing;
     let (folder, skipped) = dir.read()?;
     // An item whose server version doesn't verify is left alone on both
     // sides: a tampered head must not delete or replace it here.
@@ -238,6 +272,16 @@ pub async fn sync(
                     revision_id,
                 } => {
                     outcome.sent += 1;
+                    if plan.reupload.contains(&key) {
+                        outcome.reuploaded.push(key.clone());
+                    }
+                    let base = match change {
+                        Change::Create { .. } => None,
+                        Change::Update { base, .. }
+                        | Change::Restore { base, .. }
+                        | Change::Delete { base } => Some(base.revision_id.as_str()),
+                    };
+                    state.saw(&artifact_id, &revision_id, base);
                     match change {
                         Change::Delete { .. } => {
                             state.items.remove(&key);
@@ -556,6 +600,24 @@ mod tests {
         let plan = plan(&local, &remote, &state, Options::default());
         assert_eq!(plan.remove, ["skill/removed-there"]);
         assert_eq!(kinds(&plan), ["restore edited-here"]);
+    }
+
+    #[test]
+    fn only_a_signed_delete_removes_an_item_here() {
+        // Both synced before; the server lists one as deleted and the other
+        // not at all.
+        let (local, remote, state) = sides(
+            &[local_item("deleted", "x"), local_item("missing", "y")],
+            &[remote_item("deleted", "r2", "x", true)],
+            &[
+                agreed_on("deleted", "r1", "x"),
+                agreed_on("missing", "r1", "y"),
+            ],
+        );
+        let plan = plan(&local, &remote, &state, Options::default());
+        assert_eq!(plan.remove, ["skill/deleted"]);
+        assert_eq!(kinds(&plan), ["create missing"]);
+        assert_eq!(plan.reupload, ["skill/missing"]);
     }
 
     #[test]

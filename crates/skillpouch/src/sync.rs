@@ -46,6 +46,9 @@ pub struct Report {
     pub first: bool,
     /// Items deleted in an assistant, so taken out of the pouch (`skill pdf`).
     pub removed: Vec<String>,
+    /// Items the server no longer had though nobody deleted them, sent
+    /// again from here (`skill/pdf`).
+    pub reuploaded: Vec<String>,
 }
 
 /// Why nothing was synced.
@@ -57,6 +60,10 @@ pub enum Stopped {
         "The pouch is locked: your plan has fewer pouches than you have. Unlock it on the web."
     )]
     Locked,
+    #[error(
+        "The pouch this computer synced was deleted. Its items stay on this computer; run `skillpouch` to choose another pouch."
+    )]
+    PouchDeleted,
 }
 
 /// The dashboard's sync line: from the status file, whether the
@@ -413,7 +420,7 @@ async fn run_with(ctx: &Context, session: &mut Session, mut record: SetupRecord)
     let mut state = PouchState::load(&ctx.home, &record.pouch_id)?;
     if state.epoch != remote.pouch.epoch && !state.epoch.is_empty() {
         // The pouch's history was rewritten: compare everything afresh.
-        state = PouchState::default();
+        state.restart();
     }
     for round in 0..ROUNDS {
         let outcome = engine::sync(
@@ -433,6 +440,7 @@ async fn run_with(ctx: &Context, session: &mut Session, mut record: SetupRecord)
         report.received += outcome.received;
         report.conflicts += outcome.conflicts;
         report.problems.extend(outcome.rejected);
+        report.reuploaded.extend(outcome.reuploaded);
         if outcome.unreadable > 0 && round == 0 {
             report.problems.push(format!(
                 "{} item(s) in the pouch couldn't be verified and were left out",
@@ -845,6 +853,7 @@ fn bring_in_new(
 fn api_signed_out(error: SyncError) -> anyhow::Error {
     match error {
         SyncError::Api(api) if api.code().is_some() => crate::context::signed_out(*api),
+        SyncError::PouchDeleted => Stopped::PouchDeleted.into(),
         other => other.into(),
     }
 }

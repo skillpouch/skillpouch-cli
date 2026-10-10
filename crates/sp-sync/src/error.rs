@@ -15,6 +15,15 @@ pub enum SyncError {
     Core(#[from] sp_core::CoreError),
     #[error("{0}")]
     Invalid(String),
+    /// The server offered a version of an item that this computer already
+    /// saw replaced by a newer one.
+    #[error(
+        "the server offered an older version of {0} than this computer already verified; nothing was changed here"
+    )]
+    Rollback(String),
+    /// The pouch was deleted (or is no longer there at all).
+    #[error("the pouch this computer syncs was deleted")]
+    PouchDeleted,
 }
 
 impl From<sp_api::ApiError> for SyncError {
