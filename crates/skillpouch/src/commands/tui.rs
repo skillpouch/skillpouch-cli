@@ -166,16 +166,6 @@ async fn serve(
                     let _ = updates.send(Update::Notice(Notice::error(message(&error))));
                 }
             }
-            Request::Unlink => {
-                let notice = match crate::choose::unlink_all(&ctx) {
-                    Ok(_) => Notice::success(
-                        "Unlinked: SkillPouch no longer syncs this computer. Every file stays.",
-                    ),
-                    Err(error) => Notice::error(message(&error)),
-                };
-                let _ = updates.send(Update::Notice(notice));
-                let _ = updates.send(Update::Sync(None));
-            }
             Request::Setup => {
                 let (ctx, updates) = (Arc::clone(&ctx), updates.clone());
                 tokio::spawn(async move {

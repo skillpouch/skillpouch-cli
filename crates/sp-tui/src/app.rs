@@ -69,18 +69,14 @@ pub enum AccountAction {
     SetUp,
     OpenAccount,
     OpenBilling,
-    Relogin,
-    Unlink,
     Logout,
 }
 
 impl AccountAction {
-    pub const ALL: [AccountAction; 6] = [
+    pub const ALL: [AccountAction; 4] = [
         Self::SetUp,
         Self::OpenAccount,
         Self::OpenBilling,
-        Self::Relogin,
-        Self::Unlink,
         Self::Logout,
     ];
 
@@ -89,8 +85,6 @@ impl AccountAction {
             Self::SetUp => "Set up this computer again",
             Self::OpenAccount => "Open your account",
             Self::OpenBilling => "Manage plan and billing",
-            Self::Relogin => "Log in again with new keys",
-            Self::Unlink => "Unlink this computer",
             Self::Logout => "Log out",
         }
     }
@@ -100,8 +94,6 @@ impl AccountAction {
             Self::SetUp => "Pick the pouch it syncs and how the first sync starts",
             Self::OpenAccount => "Profile, sign-in and security, in the browser",
             Self::OpenBilling => "Change or cancel your plan, in the browser",
-            Self::Relogin => "Replaces this computer's keys once you approve",
-            Self::Unlink => "Stops syncing here; every file stays, as a real file",
             Self::Logout => "Deletes this computer's keys",
         }
     }
@@ -127,8 +119,6 @@ pub struct App {
     pub setup: Option<Setup>,
     /// Asking before logging out.
     pub confirm_logout: bool,
-    /// Asking before unlinking this computer.
-    pub confirm_unlink: bool,
     notice: Option<(Notice, Instant)>,
     pub tick: usize,
 }
@@ -148,7 +138,6 @@ impl App {
             login: (!signed_in).then(Login::idle),
             setup: None,
             confirm_logout: false,
-            confirm_unlink: false,
             notice: None,
             tick: 0,
         }
@@ -329,13 +318,6 @@ impl App {
         if self.confirm_logout {
             return self.on_logout_key(key.code);
         }
-        if self.confirm_unlink {
-            self.confirm_unlink = false;
-            return match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => Outcome::Send(Request::Unlink),
-                _ => Outcome::Nothing,
-            };
-        }
         self.on_dashboard_key(key.code)
     }
 
@@ -441,14 +423,6 @@ impl App {
                     Some(AccountAction::SetUp) => Outcome::Send(Request::Setup),
                     Some(AccountAction::OpenAccount) => self.open("/app/account"),
                     Some(AccountAction::OpenBilling) => self.open("/app/account/billing"),
-                    Some(AccountAction::Relogin) => {
-                        self.login = Some(Login::idle());
-                        Outcome::Nothing
-                    }
-                    Some(AccountAction::Unlink) => {
-                        self.confirm_unlink = true;
-                        Outcome::Nothing
-                    }
                     Some(AccountAction::Logout) => {
                         self.confirm_logout = true;
                         Outcome::Nothing
@@ -786,16 +760,24 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn logging_in_again_can_be_left_for_the_dashboard() {
+    fn the_account_tab_offers_setup_the_web_and_log_out() {
+        let labels: Vec<&str> = AccountAction::ALL.iter().map(|a| a.label()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Set up this computer again",
+                "Open your account",
+                "Manage plan and billing",
+                "Log out"
+            ]
+        );
         let mut app = ready();
         press(&mut app, KeyCode::Char('6'));
         for _ in 0..3 {
             press(&mut app, KeyCode::Down);
         }
         press(&mut app, KeyCode::Enter);
-        assert!(app.login.is_some());
-        press(&mut app, KeyCode::Esc);
-        assert!(app.login.is_none());
+        assert!(app.confirm_logout && app.login.is_none());
     }
 
     #[test]
@@ -826,20 +808,6 @@ pub(crate) mod tests {
         assert!(
             app.notice()
                 .is_some_and(|n| n.text.contains("at least one"))
-        );
-    }
-
-    #[test]
-    fn unlink_asks_first() {
-        let mut app = ready();
-        press(&mut app, KeyCode::Char('6'));
-        press(&mut app, KeyCode::Up);
-        press(&mut app, KeyCode::Up);
-        assert_eq!(press(&mut app, KeyCode::Enter), Outcome::Nothing);
-        assert!(app.confirm_unlink);
-        assert_eq!(
-            press(&mut app, KeyCode::Char('y')),
-            Outcome::Send(Request::Unlink)
         );
     }
 

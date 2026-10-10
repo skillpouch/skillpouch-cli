@@ -59,9 +59,6 @@ pub fn draw(app: &App, frame: &mut Frame) {
     if app.confirm_logout {
         draw_logout(frame, area);
     }
-    if app.confirm_unlink {
-        draw_unlink(frame, area);
-    }
 }
 
 fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
@@ -197,30 +194,6 @@ fn draw_logout(frame: &mut Frame, area: Rect) {
         ),
         Line::default(),
         keys(&[("y", "log out"), ("n", "cancel")]),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(block),
-        rect,
-    );
-}
-
-fn draw_unlink(frame: &mut Frame, area: Rect) {
-    let rect = centered(area, 64, 8);
-    frame.render_widget(Clear, rect);
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(theme::BORDER_STRONG))
-        .padding(Padding::new(2, 2, 1, 0));
-    let lines = vec![
-        Line::styled("Unlink this computer?", theme::strong()),
-        Line::styled(
-            "SkillPouch stops syncing here. Every file stays, as a real file.",
-            theme::meta(),
-        ),
-        Line::default(),
-        keys(&[("y", "unlink"), ("n", "cancel")]),
     ];
     frame.render_widget(
         Paragraph::new(lines)
@@ -388,7 +361,7 @@ pub(crate) mod tests {
                 "Linux x86_64",
                 "1 trusted browser",
             ],
-            &["ada@example.com", "Log in again with new keys", "Log out"],
+            &["ada@example.com", "Manage plan and billing", "Log out"],
         ];
         for (index, expected) in expected.iter().enumerate() {
             app.tab = Tab::ALL[index];

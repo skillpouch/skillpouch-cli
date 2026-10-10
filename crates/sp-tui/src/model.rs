@@ -163,8 +163,6 @@ pub enum Request {
         id: String,
         on: bool,
     },
-    /// Stop syncing this computer; every file stays as a real file.
-    Unlink,
     /// Make this pouch the one this computer syncs.
     UsePouch(String),
     /// Open a web app path (`/app/account`) in the browser.
