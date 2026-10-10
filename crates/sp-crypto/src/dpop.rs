@@ -67,7 +67,7 @@ mod tests {
             &key,
             &ProofInput {
                 method: "POST",
-                url: "https://skillpouch.net/v1/cli-auth/token",
+                url: "https://app.skillpouch.net/v1/cli-auth/token",
                 issued_at: 1_700_000_000,
                 nonce: Some("42.abc"),
                 access_token: Some("token"),
@@ -86,7 +86,10 @@ mod tests {
 
         let claims = part(parts[1]).unwrap_or_default();
         assert_eq!(claims["htm"], "POST");
-        assert_eq!(claims["htu"], "https://skillpouch.net/v1/cli-auth/token");
+        assert_eq!(
+            claims["htu"],
+            "https://app.skillpouch.net/v1/cli-auth/token"
+        );
         assert_eq!(claims["iat"], 1_700_000_000);
         assert_eq!(claims["nonce"], "42.abc");
         assert_eq!(claims["ath"], access_token_hash("token"));

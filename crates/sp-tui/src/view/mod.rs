@@ -256,7 +256,7 @@ pub(crate) mod tests {
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(screen(&app, 100, 32).contains("Creating this computer's keys"));
         app.apply(Update::Login(LoginStep::Waiting {
-            url: "https://skillpouch.net/cli/authorize?request=abc".into(),
+            url: "https://app.skillpouch.net/cli/authorize?request=abc".into(),
             code: "2605-3825".into(),
             computer: "laptop".into(),
             opened: true,
@@ -264,7 +264,7 @@ pub(crate) mod tests {
         contains_all(
             &screen(&app, 100, 32),
             &[
-                "https://skillpouch.net/cli/authorize?request=abc",
+                "https://app.skillpouch.net/cli/authorize?request=abc",
                 "2605  3825",
                 "Waiting for approval",
                 "esc cancel",
@@ -309,7 +309,7 @@ pub(crate) mod tests {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
         assert!(matches!(
             app.on_key(key),
-            crate::app::Outcome::Send(crate::model::Request::Open(url)) if url == "https://skillpouch.net/app/p/p1/conflicts"
+            crate::app::Outcome::Send(crate::model::Request::Open(url)) if url == "https://app.skillpouch.net/app/p/p1/conflicts"
         ));
     }
 

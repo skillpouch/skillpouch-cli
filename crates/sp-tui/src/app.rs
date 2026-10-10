@@ -538,7 +538,7 @@ pub(crate) mod tests {
     pub fn launch() -> Launch {
         Launch {
             version: "v0.1.0".into(),
-            server: "https://skillpouch.net".into(),
+            server: "https://app.skillpouch.net".into(),
             hostname: "laptop".into(),
         }
     }
@@ -696,7 +696,7 @@ pub(crate) mod tests {
         assert_eq!(
             press(&mut app, KeyCode::Char('o')),
             Outcome::Send(Request::Open(
-                "https://skillpouch.net/app/p/0193ab12-0000-7000-8000-000000000002".into()
+                "https://app.skillpouch.net/app/p/0193ab12-0000-7000-8000-000000000002".into()
             ))
         );
     }
@@ -753,7 +753,7 @@ pub(crate) mod tests {
             Outcome::Send(Request::Login)
         );
         app.apply(Update::Login(LoginStep::Waiting {
-            url: "https://skillpouch.net/cli/authorize?r=1".into(),
+            url: "https://app.skillpouch.net/cli/authorize?r=1".into(),
             code: "2605-3825".into(),
             computer: "laptop".into(),
             opened: true,
@@ -761,7 +761,7 @@ pub(crate) mod tests {
         assert_eq!(
             press(&mut app, KeyCode::Char('o')),
             Outcome::Send(Request::Open(
-                "https://skillpouch.net/cli/authorize?r=1".into()
+                "https://app.skillpouch.net/cli/authorize?r=1".into()
             ))
         );
         app.apply(Update::Login(LoginStep::Approved));

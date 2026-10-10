@@ -122,7 +122,7 @@ mod tests {
         plain();
         let card = Card::new("Account")
             .row("Plan", "Free")
-            .row("Server", "https://skillpouch.net")
+            .row("Server", "https://app.skillpouch.net")
             .render(80);
         let lines: Vec<&str> = card.lines().collect();
         assert_eq!(lines.len(), 4);

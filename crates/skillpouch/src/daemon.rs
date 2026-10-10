@@ -806,14 +806,14 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let ctx = Context::load_with(
             Some(dir.path().join(".skillpouch")),
-            Some("https://skillpouch.net".into()),
+            Some("https://app.skillpouch.net".into()),
         )?;
         let exe = crate::update::exe().context("no exe")?;
         let same = Identity {
             pid: 1,
             version: VERSION.into(),
             exe: exe.clone(),
-            api_url: "https://skillpouch.net".into(),
+            api_url: "https://app.skillpouch.net".into(),
         };
         assert!(!same.outdated(&ctx));
         let newer = Identity {

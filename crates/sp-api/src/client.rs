@@ -43,7 +43,7 @@ struct Reply {
 }
 
 impl Client {
-    /// `base` is the server origin, e.g. `https://skillpouch.net`.
+    /// `base` is the server origin, e.g. `https://app.skillpouch.net`.
     pub fn new(base: &str, user_agent: &str) -> Result<Self> {
         // Already installed by an earlier client: that's fine.
         let _ = rustls::crypto::ring::default_provider().install_default();
