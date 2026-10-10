@@ -53,7 +53,9 @@ fn key(row: &UsageRow) -> RowKey {
 
 /// Sends this computer's new usage and returns the account's.
 pub async fn sync(ctx: &Context, session: &Session, reported: &Reported) -> Result<Usage, String> {
-    let scanned = tokio::task::spawn_blocking(scan)
+    let cache = ctx.home.state_dir().join("usage-scan.json");
+    let _ = ctx.home.ensure_private_dir(&ctx.home.state_dir());
+    let scanned = tokio::task::spawn_blocking(move || scan(cache))
         .await
         .map_err(|error| format!("Couldn't read token usage: {error}."))?;
     if let Some((source, rows)) = scanned {
@@ -79,12 +81,13 @@ pub async fn sync(ctx: &Context, session: &Session, reported: &Reported) -> Resu
 }
 
 /// This computer's source id and its usage rows.
-fn scan() -> Option<(String, Vec<UsageRow>)> {
+fn scan(cache: std::path::PathBuf) -> Option<(String, Vec<UsageRow>)> {
     let home = user_home()?;
-    let rows = sp_usage::scan(&Locations::of(&home))
-        .into_iter()
-        .map(row)
-        .collect();
+    let locations = Locations {
+        cache: Some(cache),
+        ..Locations::of(&home)
+    };
+    let rows = sp_usage::scan(&locations).into_iter().map(row).collect();
     Some((sp_usage::source_id(&home), rows))
 }
 

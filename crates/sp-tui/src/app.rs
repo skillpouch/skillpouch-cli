@@ -200,9 +200,20 @@ impl App {
                 self.refreshing = false;
                 self.login.get_or_insert_with(Login::idle);
             }
-            Update::Loaded(dashboard) => {
+            Update::Loaded(mut dashboard) => {
+                // Keep the last counts while new ones are worked out.
+                if dashboard.usage.is_none()
+                    && let Some(old) = self.dashboard()
+                {
+                    dashboard.usage = old.usage.clone();
+                }
                 self.status = Status::Ready(dashboard);
                 self.refreshing = false;
+            }
+            Update::Usage(usage) => {
+                if let Status::Ready(dashboard) = &mut self.status {
+                    dashboard.usage = Some(usage);
+                }
             }
             Update::Failed(message) => {
                 self.refreshing = false;
@@ -597,7 +608,7 @@ pub(crate) mod tests {
             ],
             browsers: 1,
             names_missing: None,
-            usage: Ok(crate::usage::tests::usage()),
+            usage: Some(Ok(crate::usage::tests::usage())),
             first_sync: None,
             sync: None,
             choice: crate::model::ChoiceView {
@@ -641,6 +652,26 @@ pub(crate) mod tests {
 
     fn press(app: &mut App, code: KeyCode) -> Outcome {
         app.on_key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn usage_arrives_after_the_dashboard_and_survives_a_refresh() {
+        let mut app = App::new(launch(), true);
+        let mut first = dashboard();
+        first.usage = None;
+        app.apply(Update::Loaded(Box::new(first.clone())));
+        assert!(app.dashboard().is_some_and(|d| d.usage.is_none()));
+        app.apply(Update::Usage(Ok(crate::usage::tests::usage())));
+        assert!(
+            app.dashboard()
+                .is_some_and(|d| matches!(d.usage, Some(Ok(_))))
+        );
+        // A refresh counts again; the last counts stay meanwhile.
+        app.apply(Update::Loaded(Box::new(first)));
+        assert!(
+            app.dashboard()
+                .is_some_and(|d| matches!(d.usage, Some(Ok(_))))
+        );
     }
 
     #[test]

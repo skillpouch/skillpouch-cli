@@ -64,7 +64,7 @@ pub fn overview(app: &App, frame: &mut Frame, area: Rect) {
         Paragraph::new(details).wrap(Wrap { trim: false }),
         details_area,
     );
-    token_section(dashboard, frame, tokens);
+    token_section(dashboard, app.tick, frame, tokens);
 }
 
 /// `● Synced 2 min ago`, with the reason under it when there is one.
@@ -174,7 +174,7 @@ fn details(dashboard: &Dashboard, width: u16, tick: usize) -> Vec<Line<'static>>
     lines
 }
 
-fn token_section(dashboard: &Dashboard, frame: &mut Frame, area: Rect) {
+fn token_section(dashboard: &Dashboard, tick: usize, frame: &mut Frame, area: Rect) {
     let [heading, totals, _, chart] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -187,13 +187,16 @@ fn token_section(dashboard: &Dashboard, frame: &mut Frame, area: Rect) {
         heading,
     );
     let usage = match &dashboard.usage {
-        Ok(usage) => usage,
-        Err(reason) => {
-            frame.render_widget(
-                Paragraph::new(Line::styled(reason.clone(), theme::meta()))
-                    .wrap(Wrap { trim: false }),
-                totals,
-            );
+        Some(Ok(usage)) => usage,
+        other => {
+            let line = match other {
+                Some(Err(reason)) => Line::styled(reason.clone(), theme::meta()),
+                _ => Line::from(vec![
+                    spinner(tick),
+                    Span::styled(" Counting tokens…", theme::meta()),
+                ]),
+            };
+            frame.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), totals);
             return;
         }
     };

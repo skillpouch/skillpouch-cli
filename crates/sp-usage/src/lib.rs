@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use time::{Date, OffsetDateTime};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Counts {
     /// Input not read from the prompt cache.
     pub input: u64,
@@ -65,6 +65,9 @@ pub struct Locations {
     pub claude: Vec<PathBuf>,
     pub codex: Vec<PathBuf>,
     pub opencode: Vec<PathBuf>,
+    /// Where to remember what was read, so the next scan only reads what
+    /// changed. `None` reads everything.
+    pub cache: Option<PathBuf>,
 }
 
 impl Locations {
@@ -83,6 +86,7 @@ impl Locations {
                 .flat_map(|dir| [dir.join("sessions"), dir.join("archived_sessions")])
                 .collect(),
             opencode: vec![data.join("opencode")],
+            cache: None,
         }
     }
 }
@@ -92,7 +96,10 @@ pub fn scan(locations: &Locations) -> Vec<DayUsage> {
     let mut entries = Vec::new();
     entries.extend(claude::read(&unique(&locations.claude)));
     entries.extend(codex::read(&unique(&locations.codex)));
-    entries.extend(opencode::read(&unique(&locations.opencode)));
+    entries.extend(opencode::read(
+        &unique(&locations.opencode),
+        locations.cache.as_deref(),
+    ));
     by_day(drop_sdk_echoes(entries))
 }
 

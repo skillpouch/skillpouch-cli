@@ -5,8 +5,8 @@
 
 use crate::{Counts, Entry, files, model_name};
 use rusqlite::{Connection, OpenFlags};
-use serde::Deserialize;
-use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 
@@ -59,24 +59,101 @@ struct Times {
     created: i64,
 }
 
-pub fn read(dirs: &[PathBuf]) -> Vec<Entry> {
+/// What one assistant message counted, kept between scans: current
+/// databases hold gigabytes of conversation, and only messages changed since
+/// the last scan are read again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Counted {
+    model: String,
+    at_ms: i64,
+    counts: Counts,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Database {
+    /// Per table: the newest `time_updated` read.
+    read_up_to: HashMap<String, i64>,
+    messages: HashMap<String, Counted>,
+}
+
+/// The scan cache: per database file.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ScanCache {
+    format: u32,
+    databases: HashMap<String, Database>,
+}
+
+const CACHE_FORMAT: u32 = 1;
+
+impl ScanCache {
+    fn load(path: Option<&Path>) -> Self {
+        path.and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<ScanCache>(&bytes).ok())
+            .filter(|cache| cache.format == CACHE_FORMAT)
+            .unwrap_or_default()
+    }
+
+    fn save(&self, path: Option<&Path>) {
+        let Some(path) = path else { return };
+        let Ok(bytes) = serde_json::to_vec(self) else {
+            return;
+        };
+        let staged = path.with_extension("tmp");
+        if std::fs::write(&staged, bytes).is_ok() {
+            let _ = std::fs::rename(&staged, path);
+        }
+    }
+}
+
+/// `cache`: where scans are remembered; `None` reads everything every time.
+pub fn read(dirs: &[PathBuf], cache: Option<&Path>) -> Vec<Entry> {
+    let mut remembered = ScanCache::load(cache);
+    remembered.format = CACHE_FORMAT;
     let mut seen = HashSet::new();
     let mut entries = Vec::new();
     for dir in dirs {
-        read_database(&dir.join("opencode.db"), &mut seen, &mut entries);
+        let path = dir.join("opencode.db");
+        let database = remembered
+            .databases
+            .entry(path.to_string_lossy().into_owned())
+            .or_default();
+        read_database(&path, database);
+        for (id, counted) in &database.messages {
+            if seen.insert(id.clone())
+                && let Some(entry) = entry(counted)
+            {
+                entries.push(entry);
+            }
+        }
         for file in files(&dir.join("storage/message"), "json") {
             let Ok(text) = std::fs::read_to_string(&file) else {
                 continue;
             };
-            if let Some(entry) = parse(&text, None, false, &mut seen) {
+            if let Some((id, counted)) = parse(&text, None, false)
+                && seen.insert(id)
+                && let Some(entry) = entry(&counted)
+            {
                 entries.push(entry);
             }
         }
     }
+    remembered.save(cache);
     entries
 }
 
-fn read_database(path: &Path, seen: &mut HashSet<String>, entries: &mut Vec<Entry>) {
+fn entry(counted: &Counted) -> Option<Entry> {
+    Some(Entry {
+        assistant: ID,
+        model: counted.model.clone(),
+        at: OffsetDateTime::from_unix_timestamp_nanos(i128::from(counted.at_ms) * 1_000_000)
+            .ok()?,
+        counts: counted.counts,
+        via_sdk: false,
+    })
+}
+
+/// Reads what changed since the last scan into `database`.
+fn read_database(path: &Path, database: &mut Database) {
     if !path.is_file() {
         return;
     }
@@ -87,39 +164,47 @@ fn read_database(path: &Path, seen: &mut HashSet<String>, entries: &mut Vec<Entr
         return;
     };
     let _ = db.busy_timeout(std::time::Duration::from_secs(2));
-    // Newest first: a message in both tables is read from the current one.
-    for (sql, assistant) in [
-        (
-            "SELECT id, data FROM session_message WHERE type = 'assistant'",
-            true,
-        ),
-        ("SELECT id, data FROM message", false),
+    // Current table first: a message kept in both is read from it.
+    for (table, filter, assistant) in [
+        ("session_message", "type = 'assistant' AND ", true),
+        ("message", "", false),
     ] {
+        let from = database.read_up_to.get(table).copied().unwrap_or(i64::MIN);
+        // `>=`: a message saved twice in the same millisecond isn't missed.
+        let incremental =
+            format!("SELECT id, data, time_updated FROM {table} WHERE {filter}time_updated >= ?1");
+        // Versions without `time_updated` are read whole.
+        let whole = format!("SELECT id, data, 0 FROM {table} WHERE {filter}?1 = ?1");
         // A table this version doesn't have.
-        let Ok(mut query) = db.prepare(sql) else {
+        let Ok(mut query) = db.prepare(&incremental).or_else(|_| db.prepare(&whole)) else {
             continue;
         };
-        let Ok(rows) = query.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        let Ok(rows) = query.query_map([from], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         }) else {
             continue;
         };
-        for (id, data) in rows.flatten() {
-            if let Some(entry) = parse(&data, Some(id), assistant, seen) {
-                entries.push(entry);
+        let mut newest = from;
+        for (id, data, updated) in rows.flatten() {
+            newest = newest.max(updated);
+            if !assistant && database.messages.contains_key(&id) {
+                continue;
+            }
+            if let Some((id, counted)) = parse(&data, Some(id), assistant) {
+                database.messages.insert(id, counted);
             }
         }
+        database.read_up_to.insert(table.to_string(), newest);
     }
 }
 
 /// `assistant`: the row is known to be one (current versions keep the role
 /// in a column, not in the JSON).
-fn parse(
-    json: &str,
-    id: Option<String>,
-    assistant: bool,
-    seen: &mut HashSet<String>,
-) -> Option<Entry> {
+fn parse(json: &str, id: Option<String>, assistant: bool) -> Option<(String, Counted)> {
     if !json.contains("\"tokens\"") {
         return None;
     }
@@ -129,31 +214,31 @@ fn parse(
     }
     let model = model_name(message.model());
     let id = id.or(message.id)?;
-    if !seen.insert(id) {
-        return None;
-    }
+    let at_ms = message.time.as_ref()?.created;
     let tokens = message.tokens?;
-    let at = OffsetDateTime::from_unix_timestamp_nanos(
-        i128::from(message.time.as_ref()?.created) * 1_000_000,
-    )
-    .ok()?;
-    Some(Entry {
-        assistant: ID,
-        model,
-        at,
-        counts: Counts {
-            input: tokens.input,
-            output: tokens.output + tokens.reasoning,
-            cache_read: tokens.cache.read,
-            cache_write: tokens.cache.write,
+    Some((
+        id,
+        Counted {
+            model,
+            at_ms,
+            counts: Counts {
+                input: tokens.input,
+                output: tokens.output + tokens.reasoning,
+                cache_read: tokens.cache.read,
+                cache_write: tokens.cache.write,
+            },
         },
-        via_sdk: false,
-    })
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sorted(mut entries: Vec<Entry>) -> Vec<Entry> {
+        entries.sort_by(|a, b| (a.model.as_str(), a.at).cmp(&(b.model.as_str(), b.at)));
+        entries
+    }
 
     const MESSAGE: &str = r#"{"role":"assistant","modelID":"claude-opus-5-5","providerID":"anthropic","tokens":{"total":1,"input":2,"output":40,"reasoning":5,"cache":{"read":700,"write":11}},"time":{"created":1791039429424}}"#;
 
@@ -180,7 +265,7 @@ mod tests {
         std::fs::write(legacy.join("msg_b.json"), with_id("msg_b"))
             .unwrap_or_else(|e| panic!("{e}"));
 
-        let entries = read(&[dir.path().to_path_buf()]);
+        let entries = sorted(read(&[dir.path().to_path_buf()], None));
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].model, "claude-opus-5-5");
         assert_eq!(
@@ -227,14 +312,14 @@ mod tests {
         }
         drop(db);
 
-        let entries = read(&[dir.path().to_path_buf()]);
+        let entries = sorted(read(&[dir.path().to_path_buf()], None));
         let models: Vec<&str> = entries.iter().map(|e| e.model.as_str()).collect();
         assert_eq!(
             models,
-            ["glm-5.3-flash", "glm-5.3-flash", "claude-opus-5-5"]
+            ["claude-opus-5-5", "glm-5.3-flash", "glm-5.3-flash"]
         );
         assert_eq!(
-            entries[0].counts,
+            entries[1].counts,
             Counts {
                 input: 10,
                 output: 23,
@@ -256,6 +341,49 @@ mod tests {
         )
         .unwrap_or_else(|e| panic!("{e}"));
         drop(db);
-        assert_eq!(read(&[dir.path().to_path_buf()]).len(), 1);
+        assert_eq!(read(&[dir.path().to_path_buf()], None).len(), 1);
+    }
+
+    #[test]
+    fn later_scans_read_only_what_changed() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let cache = dir.path().join("cache.json");
+        let db = Connection::open(dir.path().join("opencode.db")).unwrap_or_else(|e| panic!("{e}"));
+        db.execute_batch(
+            "CREATE TABLE session_message (id TEXT PRIMARY KEY, type TEXT, time_updated INTEGER, data TEXT)",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let reply = |output: u64| {
+            format!(
+                r#"{{"time":{{"created":1791039429424}},"model":{{"id":"glm-5.3-flash"}},"tokens":{{"input":1,"output":{output}}}}}"#
+            )
+        };
+        let insert = |id: &str, updated: i64, output: u64| {
+            db.execute(
+                "INSERT OR REPLACE INTO session_message (id, type, time_updated, data) VALUES (?1, 'assistant', ?2, ?3)",
+                rusqlite::params![id, updated, reply(output)],
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        };
+        insert("a", 10, 5);
+        insert("b", 20, 7);
+        let dirs = [dir.path().to_path_buf()];
+        let total = |entries: Vec<Entry>| entries.iter().map(|e| e.counts.output).sum::<u64>();
+        assert_eq!(total(read(&dirs, Some(&cache))), 12);
+
+        // Rewritten behind the cache's back without a newer time: not read again.
+        db.execute(
+            "UPDATE session_message SET data = ?1 WHERE id = 'a'",
+            [reply(500)],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(total(read(&dirs, Some(&cache))), 12);
+
+        // Updated (a reply still streaming) and new ones are.
+        insert("b", 30, 70);
+        insert("c", 30, 1);
+        assert_eq!(total(read(&dirs, Some(&cache))), 5 + 70 + 1);
+        // Without the cache everything is read.
+        assert_eq!(total(read(&dirs, None)), 500 + 70 + 1);
     }
 }

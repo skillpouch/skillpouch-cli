@@ -148,7 +148,7 @@ async fn serve(
                     ))));
                 }
                 // Either way the server has the last word.
-                let _ = updates.send(load(&ctx, &reported).await);
+                let _ = updates.send(load(&ctx).await);
             }
             Request::Choose { assistant, id, on } => {
                 let choice = if assistant {
@@ -179,7 +179,7 @@ async fn serve(
                 ));
                 if saved.is_ok() {
                     keep_syncing(&ctx).await;
-                    let _ = updates.send(load(&ctx, &reported).await);
+                    let _ = updates.send(load(&ctx).await);
                 }
             }
             Request::Open(url) => {
@@ -253,9 +253,13 @@ async fn load_and_offer(
     offered: &AtomicBool,
     updates: &Sender<Update>,
 ) {
-    let update = load(ctx, reported).await;
+    let update = load(ctx).await;
     let loaded = matches!(update, Update::Loaded(_));
     let _ = updates.send(update);
+    if loaded && let Ok(session) = ctx.session() {
+        let usage = usage::sync(ctx, &session, reported).await;
+        let _ = updates.send(Update::Usage(usage));
+    }
     let Ok(Some(credentials)) = ctx.credentials() else {
         return;
     };
@@ -325,13 +329,13 @@ async fn watch_sync(ctx: Arc<Context>, updates: Sender<Update>) {
     }
 }
 
-async fn load(ctx: &Context, reported: &Reported) -> Update {
+async fn load(ctx: &Context) -> Update {
     match ctx.credentials() {
         Ok(Some(_)) => {}
         Ok(None) => return Update::SignedOut,
         Err(error) => return Update::Failed(message(&error)),
     }
-    match fetch(ctx, reported).await {
+    match fetch(ctx).await {
         Ok(dashboard) => Update::Loaded(Box::new(dashboard)),
         // Removed or expired: this computer has to log in again.
         Err(error)
@@ -345,14 +349,15 @@ async fn load(ctx: &Context, reported: &Reported) -> Update {
     }
 }
 
-async fn fetch(ctx: &Context, reported: &Reported) -> Result<Dashboard> {
+async fn fetch(ctx: &Context) -> Result<Dashboard> {
     let mut session = ctx.session()?;
     // Refreshes the access token first when it needs it.
     let me = status::fetch_me(ctx, &mut session).await?;
     let token = session.credentials.access_token.as_str();
     let key = &session.key;
-    // Names and usage are extras: without them the dashboard still shows.
-    let (listed, names, usage) = tokio::join!(
+    // Names are extras: without them the dashboard still shows. Usage comes
+    // later (counting the logs can take a while).
+    let (listed, names) = tokio::join!(
         async {
             tokio::try_join!(
                 ctx.client.pouches(key, token),
@@ -360,7 +365,6 @@ async fn fetch(ctx: &Context, reported: &Reported) -> Result<Dashboard> {
             )
         },
         names::pouch_names(ctx, &session),
-        usage::sync(ctx, &session, reported),
     );
     let (pouches, devices) = listed.map_err(signed_out)?;
     let active = devices
@@ -385,7 +389,7 @@ async fn fetch(ctx: &Context, reported: &Reported) -> Result<Dashboard> {
             devices,
             contents,
             names,
-            usage,
+            usage: None,
             first_sync,
         },
         OffsetDateTime::now_utc(),
@@ -402,7 +406,7 @@ struct Answers {
     devices: DeviceList,
     contents: Vec<(String, ArtifactList)>,
     names: Result<BTreeMap<String, PouchMeta>, names::Missing>,
-    usage: Result<Usage, String>,
+    usage: Option<Result<Usage, String>>,
     /// The first sync chosen at setup, while it hasn't run.
     first_sync: Option<String>,
 }
@@ -626,7 +630,7 @@ mod tests {
                 devices,
                 contents: vec![("p2".into(), items)],
                 names: Ok(names),
-                usage: Err("offline".into()),
+                usage: None,
                 first_sync: Some("Merge with Claude Code".into()),
             },
             now,

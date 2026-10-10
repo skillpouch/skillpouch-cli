@@ -25,8 +25,19 @@ pub fn usage(app: &App, frame: &mut Frame, area: Rect) {
         return;
     };
     let usage = match &dashboard.usage {
-        Ok(usage) => usage,
-        Err(reason) => {
+        Some(Ok(usage)) => usage,
+        None => {
+            let line = Line::from(vec![
+                crate::view::widgets::spinner(app.tick),
+                Span::styled(
+                    " Counting the tokens in this computer's logs…",
+                    theme::meta(),
+                ),
+            ]);
+            frame.render_widget(Paragraph::new(line), area);
+            return;
+        }
+        Some(Err(reason)) => {
             let lines = vec![
                 Line::styled("Token usage isn't available.", theme::text()),
                 Line::styled(reason.clone(), theme::meta()),

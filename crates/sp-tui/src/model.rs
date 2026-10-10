@@ -81,7 +81,8 @@ pub struct Dashboard {
     /// Why the pouch names couldn't be read, when they couldn't.
     pub names_missing: Option<String>,
     /// Token usage of every computer; `Err` says why it isn't there.
-    pub usage: Result<Usage, String>,
+    /// `None` while this computer's logs are still being counted.
+    pub usage: Option<Result<Usage, String>>,
     /// The first sync chosen at setup, while it hasn't run: `Merge with OpenCode`.
     pub first_sync: Option<String>,
     /// How syncing this computer is going; `None` before it is set up.
@@ -200,6 +201,8 @@ pub enum FirstSync {
 /// The CLI tells the TUI what happened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Update {
+    /// Token usage, counted after the rest of the dashboard.
+    Usage(Result<Usage, String>),
     /// No keys for this server on this computer.
     SignedOut,
     Loaded(Box<Dashboard>),

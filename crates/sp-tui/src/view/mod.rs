@@ -387,7 +387,7 @@ pub(crate) mod tests {
     fn missing_usage_and_names_say_why() {
         let mut app = ready();
         let mut dashboard = crate::app::tests::dashboard();
-        dashboard.usage = Err("Couldn't reach the server.".into());
+        dashboard.usage = Some(Err("Couldn't reach the server.".into()));
         dashboard.names_missing = Some("Log in again to see pouch names.".into());
         app.apply(Update::Loaded(Box::new(dashboard)));
         assert!(screen(&app, 110, 34).contains("Couldn't reach the server."));
