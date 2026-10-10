@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/skillpouch/skillpouch-cli/compare/v0.2.2...v0.3.0) (2026-10-10)
+
+### Features
+
+* **cli:** skillpouch.exe has the SkillPouch icon and name ([b0a36b5](https://github.com/skillpouch/skillpouch-cli/commit/b0a36b5ea75ce75e481041b5b44db8079aba04b9))
+* **cli:** update behind the dashboard and offer a restart; check hourly in the background ([5fcd8f0](https://github.com/skillpouch/skillpouch-cli/commit/5fcd8f0daf7b2e7989ea4ffb273cc2831fb1d754))
+
+### Bug fixes
+
+* **cli:** on windows, clean up the old package npm couldn't delete after an update ([dd34437](https://github.com/skillpouch/skillpouch-cli/commit/dd344372ac738c02419ae8074c8c71017d96dd0e))
+* **cli:** on windows, updating pauses the background sync so its program can be replaced ([a16915e](https://github.com/skillpouch/skillpouch-cli/commit/a16915e003377e22d86a4a99d6b46b37722c9df5))
+
 ## [0.2.2](https://github.com/skillpouch/skillpouch-cli/compare/v0.2.1...v0.2.2) (2026-10-10)
 
 ### Bug fixes
