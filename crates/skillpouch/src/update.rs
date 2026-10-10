@@ -164,6 +164,59 @@ impl Installer {
     }
 }
 
+/// The npm package this program came in: `…/node_modules/skillpouch`.
+fn package_dir(exe: &Path) -> Option<&Path> {
+    exe.ancestors()
+        .filter(|dir| {
+            dir.file_name() == Some(std::ffi::OsStr::new(PACKAGE))
+                && dir
+                    .parent()
+                    .is_some_and(|parent| parent.ends_with("node_modules"))
+        })
+        .last()
+}
+
+/// npm moves the package it replaces aside as `.skillpouch-<hash>` (up to
+/// eight letters and digits) and deletes it once installed. On Windows a
+/// program still running from it keeps it there.
+fn leftover(name: &str) -> bool {
+    name.strip_prefix(&format!(".{PACKAGE}-"))
+        .is_some_and(|hash| {
+            (1..=8).contains(&hash.len()) && hash.chars().all(|c| c.is_ascii_alphanumeric())
+        })
+}
+
+/// Deletes what earlier updates left next to the installed package, once
+/// nothing runs from it any more. Quiet, and never fails anything.
+pub fn tidy() {
+    if !cfg!(windows) {
+        return;
+    }
+    let Some(exe) = exe() else {
+        return;
+    };
+    if installer(&exe).is_some_and(|installer| installer.manager == Manager::Npm) {
+        tidy_next_to(&exe);
+    }
+}
+
+fn tidy_next_to(exe: &Path) {
+    let Some(modules) = package_dir(exe).and_then(Path::parent) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(modules) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        // Folders only, never what a link points to.
+        let folder = entry.file_type().is_ok_and(|kind| kind.is_dir());
+        if folder && entry.file_name().to_str().is_some_and(leftover) {
+            // Still in use: whatever is left goes next time.
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 /// `latest` is a newer release than `current`. Pre-releases never are.
 pub fn newer(latest: &str, current: &str) -> bool {
     let parse = |version: &str| -> Option<Vec<u64>> {
@@ -541,6 +594,86 @@ mod tests {
         ));
         assert!(!in_use("npm error code E404"));
         assert!(!in_use("npm error code EACCES: permission denied"));
+    }
+
+    #[test]
+    fn knows_what_npm_leaves_behind() {
+        assert!(leftover(".skillpouch-Ab3dE9xZ"));
+        assert!(leftover(".skillpouch-a1"));
+        // Not npm's: too long, odd characters, other packages, the real one.
+        assert!(!leftover(".skillpouch-Ab3dE9xZq"));
+        assert!(!leftover(".skillpouch-ab_cd"));
+        assert!(!leftover(".skillpouch-"));
+        assert!(!leftover(".skillpouch"));
+        assert!(!leftover("skillpouch"));
+        assert!(!leftover(".skillpouchx-Ab3dE9xZ"));
+        assert!(!leftover(".typescript-Ab3dE9xZ"));
+    }
+
+    #[test]
+    fn finds_the_package_the_program_came_in() {
+        let exe = Path::new(
+            "/Users/ada/AppData/Roaming/npm/node_modules/skillpouch/node_modules/@skillpouch/cli-win32-x64/bin/skillpouch.exe",
+        );
+        assert_eq!(
+            package_dir(exe),
+            Some(Path::new(
+                "/Users/ada/AppData/Roaming/npm/node_modules/skillpouch"
+            ))
+        );
+        assert_eq!(
+            package_dir(Path::new("/src/skillpouch/target/release/skillpouch")),
+            None
+        );
+    }
+
+    #[test]
+    fn deletes_only_npm_leftovers_next_to_the_package() -> std::io::Result<()> {
+        let root = tempfile::tempdir()?;
+        let modules = root.path().join("node_modules");
+        let bin = modules.join("skillpouch/node_modules/@skillpouch/cli-win32-x64/bin");
+        std::fs::create_dir_all(&bin)?;
+        let exe = bin.join("skillpouch.exe");
+        std::fs::write(&exe, b"")?;
+        let old = modules.join(".skillpouch-Ab3dE9xZ/node_modules/@skillpouch/cli-win32-x64/bin");
+        std::fs::create_dir_all(&old)?;
+        std::fs::write(old.join("skillpouch.exe"), b"")?;
+        for kept in [".skillpouch-Ab3dE9xZq", ".typescript-Ab3dE9xZ", ".bin"] {
+            std::fs::create_dir_all(modules.join(kept))?;
+        }
+        std::fs::write(modules.join(".skillpouch-file0001"), b"")?;
+
+        tidy_next_to(&exe);
+
+        assert!(!modules.join(".skillpouch-Ab3dE9xZ").exists());
+        assert!(exe.exists());
+        for kept in [
+            ".skillpouch-Ab3dE9xZq",
+            ".typescript-Ab3dE9xZ",
+            ".bin",
+            ".skillpouch-file0001",
+        ] {
+            assert!(modules.join(kept).exists(), "{kept} was deleted");
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn leaves_what_a_link_points_to_alone() -> std::io::Result<()> {
+        let root = tempfile::tempdir()?;
+        let modules = root.path().join("node_modules");
+        let bin = modules.join("skillpouch/bin");
+        std::fs::create_dir_all(&bin)?;
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere)?;
+        std::fs::write(elsewhere.join("keep"), b"")?;
+        std::os::unix::fs::symlink(&elsewhere, modules.join(".skillpouch-Link0001"))?;
+
+        tidy_next_to(&bin.join("skillpouch"));
+
+        assert!(elsewhere.join("keep").exists());
+        Ok(())
     }
 
     #[test]

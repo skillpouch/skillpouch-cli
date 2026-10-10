@@ -18,6 +18,7 @@ pub fn interactive() -> bool {
 }
 
 pub async fn run(cli: Cli) -> Result<ExitCode> {
+    crate::update::tidy();
     let ctx = match &cli.command {
         Some(Command::Daemon {
             action: DaemonAction::Run { home, api_url, .. },
