@@ -62,6 +62,8 @@ impl RemoteItem {
 pub struct Head {
     pub artifact_id: String,
     pub revision_id: String,
+    pub parent_id: Option<String>,
+    pub deleted: bool,
     /// Parent and merge parent, as the signed body names them.
     pub parents: Vec<String>,
     /// `kind/name`, for messages.
@@ -93,6 +95,9 @@ pub fn fingerprint<'a>(files: impl Iterator<Item = (&'a str, &'a str, bool)>) ->
 #[derive(Debug, Clone)]
 pub enum Change {
     Create {
+        /// Reuse a previously agreed artifact id when restoring a head that
+        /// disappeared without a signed tombstone.
+        artifact_id: Option<String>,
         kind: String,
         name: String,
         files: Files,
@@ -256,6 +261,8 @@ impl<'a> Remote<'a> {
                 listing.heads.push(Head {
                     artifact_id: body.artifact_id.clone(),
                     revision_id: body.revision_id.clone(),
+                    parent_id: body.parent_id.clone(),
+                    deleted: body.deleted,
                     parents: body
                         .parent_id
                         .iter()
@@ -276,7 +283,9 @@ impl<'a> Remote<'a> {
                     kind: body.kind.clone(),
                     name: body.logical_key.clone(),
                     entries: body.entries.clone(),
-                    deleted: artifact.deleted_at.is_some() || body.deleted,
+                    // Server-side visibility metadata is unsigned. Only the
+                    // verified revision body can authorize deleting local data.
+                    deleted: body.deleted,
                     body,
                 };
                 let key = item.key();
@@ -418,9 +427,16 @@ impl<'a> Remote<'a> {
 
     fn operation(&self, change: &Change) -> Result<(Operation, Vec<SealedBlob>)> {
         let (kind, artifact_id, base, name, files, deleted) = match change {
-            Change::Create { kind, name, files } => (
+            Change::Create {
+                artifact_id,
+                kind,
+                name,
+                files,
+            } => (
                 kind.as_str(),
-                uuid::Uuid::new_v4().to_string(),
+                artifact_id
+                    .clone()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                 None,
                 name.as_str(),
                 Some(files),

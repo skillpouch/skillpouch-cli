@@ -1260,7 +1260,7 @@ async fn an_item_missing_from_the_listing_is_sent_back_not_deleted() -> TestResu
     assert_eq!(outcome.reuploaded, ["skill/pdf"]);
     assert_eq!((outcome.sent, outcome.received), (1, 0));
     assert_eq!(h.skill_on_disk("pdf").as_deref(), Some("# PDF\n"));
-    // Sent as a new, properly signed item with the same files.
+    // Reuses the original identity so an extant honest tombstone blocks it.
     let head = {
         let world = h.world();
         assert_eq!(world.artifacts.len(), 1);
@@ -1268,7 +1268,7 @@ async fn an_item_missing_from_the_listing_is_sent_back_not_deleted() -> TestResu
     };
     let body = h.open_listed(&head)?;
     assert_eq!((body.logical_key.as_str(), body.deleted), ("pdf", false));
-    assert_ne!(body.artifact_id, artifact);
+    assert_eq!(body.artifact_id, artifact);
 
     let again = h.sync().await?;
     assert_eq!((again.sent, again.received), (0, 0), "settled");
@@ -1297,6 +1297,26 @@ async fn an_item_with_a_signed_delete_is_removed() -> TestResult {
     assert_eq!(h.skill_on_disk("pdf"), None);
     assert!(outcome.reuploaded.is_empty());
     assert_eq!(h.world().commits, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unsigned_deleted_at_does_not_delete_a_live_signed_item() -> TestResult {
+    let h = Harness::new().await?;
+    let artifact = h.put_item(&h.device, "pdf", "# PDF\n")?;
+    h.sync().await?;
+    {
+        let mut world = h.world();
+        let item = world
+            .artifacts
+            .iter_mut()
+            .find(|item| item["id"] == artifact)
+            .ok_or_else(|| SyncError::Invalid("test artifact missing".into()))?;
+        item["deleted_at"] = json!("2026-01-01T00:00:00Z");
+    }
+    let outcome = h.sync().await?;
+    assert_eq!(h.skill_on_disk("pdf").as_deref(), Some("# PDF\n"));
+    assert_eq!((outcome.sent, outcome.received), (0, 0));
     Ok(())
 }
 

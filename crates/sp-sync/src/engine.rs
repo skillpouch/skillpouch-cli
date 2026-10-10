@@ -148,6 +148,7 @@ pub fn plan(
                         plan.reupload.push(key.clone());
                     }
                     plan.send.push(Change::Create {
+                        artifact_id: agreed.map(|a| a.artifact_id.clone()),
                         kind: mine.item.kind.clone(),
                         name: mine.item.name.clone(),
                         files: mine.item.files.clone(),
@@ -191,14 +192,34 @@ pub async fn sync(
 ) -> Result<Outcome> {
     let high_water = remote.pouch.event_seq;
     let listing = remote.list().await?;
-    // An older head than one seen before is a server replaying the past:
-    // nothing of this listing is trusted, nothing here changes.
-    if let Some(head) = listing
-        .heads
-        .iter()
-        .find(|head| state.is_rollback(&head.artifact_id, &head.revision_id))
-    {
-        return Err(SyncError::Rollback(head.key.clone()));
+    // Progress a known artifact only along the signed primary-parent chain.
+    // Merely seeing a descendant must not blacklist intermediate revisions:
+    // a later listing can legitimately expose them while replicas converge.
+    for head in &listing.heads {
+        if state.is_rollback(&head.artifact_id, &head.revision_id) {
+            return Err(SyncError::Rollback(head.key.clone()));
+        }
+        let pinned = state
+            .seen
+            .get(&head.artifact_id)
+            .map(|seen| seen.head.as_str())
+            .or_else(|| {
+                state
+                    .items
+                    .values()
+                    .find(|agreed| agreed.artifact_id == head.artifact_id)
+                    .map(|agreed| agreed.revision_id.as_str())
+            });
+        if let Some(pinned) = pinned
+            && head.revision_id != pinned
+            && head.parent_id.as_deref() != Some(pinned)
+            && !head.deleted
+        {
+            return Err(SyncError::Invalid(format!(
+                "cannot verify revision progression for {}: its signed parent is not the last verified head; refusing to sync this listing",
+                head.key
+            )));
+        }
     }
     for head in &listing.heads {
         state.saw(
@@ -286,7 +307,9 @@ pub async fn sync(
                         Change::Delete { .. } => {
                             state.items.remove(&key);
                         }
-                        Change::Create { kind, name, files } => {
+                        Change::Create {
+                            kind, name, files, ..
+                        } => {
                             let fingerprint = remote.local_fingerprint(files);
                             state.items.insert(
                                 key,

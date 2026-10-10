@@ -47,12 +47,11 @@ pub struct PouchState {
 }
 
 impl PouchState {
-    /// Starts over on everything but what was seen.
+    /// Reset the event cursor after a history rewrite without forgetting the
+    /// last locally agreed contents or verified heads.
     pub fn restart(&mut self) {
-        *self = Self {
-            seen: std::mem::take(&mut self.seen),
-            ..Self::default()
-        };
+        self.cursor = 0;
+        self.epoch.clear();
     }
 
     /// The artifact's head the server offers is one this computer saw
@@ -93,9 +92,11 @@ impl PouchState {
 
     pub fn load(home: &Home, pouch_id: &str) -> Result<Self> {
         let path = Self::path(home, pouch_id);
-        Ok(read_optional(&path)?
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default())
+        match read_optional(&path)? {
+            Some(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|error| crate::SyncError::Invalid(format!("invalid sync state: {error}"))),
+            None => Ok(Self::default()),
+        }
     }
 
     pub fn save(&self, home: &Home, pouch_id: &str) -> Result<()> {
@@ -125,7 +126,12 @@ impl RosterPin {
     }
 
     pub fn load(home: &Home) -> Result<Option<Self>> {
-        Ok(read_optional(&Self::path(home))?.and_then(|bytes| serde_json::from_slice(&bytes).ok()))
+        match read_optional(&Self::path(home))? {
+            Some(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|error| crate::SyncError::Invalid(format!("invalid roster pin: {error}"))),
+            None => Ok(None),
+        }
     }
 
     pub fn save(&self, home: &Home) -> Result<()> {
@@ -184,5 +190,34 @@ mod tests {
         state.restart();
         assert_eq!((state.cursor, state.items.len()), (0, 0));
         assert!(state.is_rollback("a", "r2"));
+    }
+
+    #[test]
+    fn restart_retains_the_last_agreement_for_tombstone_comparison() {
+        let agreed = Agreed {
+            artifact_id: "a".into(),
+            revision_id: "r".into(),
+            kind: "skill".into(),
+            name: "pdf".into(),
+            fingerprint: "f".into(),
+        };
+        let mut state = PouchState::default();
+        state.items.insert("skill/pdf".into(), agreed.clone());
+        state.restart();
+        assert_eq!(state.items["skill/pdf"], agreed);
+    }
+
+    #[test]
+    fn corrupt_state_is_not_treated_as_first_sync() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(|e| crate::SyncError::Invalid(e.to_string()))?;
+        let home = Home::new(dir.path());
+        let path = PouchState::path(&home, "p");
+        home.ensure_private_dir(
+            path.parent()
+                .ok_or_else(|| crate::SyncError::Invalid("state path has no parent".into()))?,
+        )?;
+        std::fs::write(path, b"{").map_err(|e| crate::SyncError::Invalid(e.to_string()))?;
+        assert!(PouchState::load(&home, "p").is_err());
+        Ok(())
     }
 }
