@@ -876,6 +876,70 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn antigravity_and_gemini_cli_share_one_instructions_link() -> Result<()> {
+        let tmp = tempfile::tempdir().map_err(io(Path::new(".")))?;
+        let home = Home::new(tmp.path().join(".skillpouch"));
+        let pouch = home.root().join("pouches/p1");
+        let dir = crate::item::PouchDir::new(&pouch);
+        let gemini = tmp.path().join(".gemini");
+        fs::create_dir_all(gemini.join("antigravity")).map_err(io(&gemini))?;
+        let items: BTreeMap<_, _> = [
+            item(
+                "instructions",
+                "instructions",
+                &[("INSTRUCTIONS.md", "# Rules")],
+            ),
+            item("skill", "pdf", &[("SKILL.md", "# PDF")]),
+            item(
+                "agent",
+                "reviewer",
+                &[(
+                    "AGENT.md",
+                    "---\nname: reviewer\ndescription: Reviews\ntools: Read, Bash\n---\n\nReview.\n",
+                )],
+            ),
+            item(
+                "mcp_server",
+                "docs",
+                &[(
+                    "server.json",
+                    r#"{"name":"docs","type":"http","url":"https://x/mcp","headers":{}}"#,
+                )],
+            ),
+        ]
+        .into_iter()
+        .collect();
+        for item in items.values() {
+            dir.write_item(&item.kind, &item.name, &item.files)?;
+        }
+        set_current(&home, &pouch)?;
+        let places = sp_harness::Places::plain(tmp.path(), home.root());
+        let targets: Vec<Target> = sp_harness::targets(&places)
+            .into_iter()
+            .filter(|target| target.id == "antigravity" || target.id == "gemini-cli")
+            .collect();
+        assert_eq!(targets.len(), 2);
+        let backups = home.root().join("backups/t1");
+        let (_, report) = project(&home, &items, &targets, &backups, &Projection::default())?;
+        assert!(report.problems.is_empty(), "{report:?}");
+        // GEMINI.md once, then a skill and an agent in each assistant.
+        assert_eq!(report.linked, 5, "{report:?}");
+        let read = |path: &Path| fs::read_to_string(path).map_err(io(path));
+        assert_eq!(read(&gemini.join("GEMINI.md"))?, "# Rules");
+        let config = gemini.join("config");
+        assert_eq!(read(&config.join("skills/pdf/SKILL.md"))?, "# PDF");
+        assert!(
+            read(&config.join("agents/reviewer.md"))?
+                .contains("tools:\n  - view_file\n  - run_command\n")
+        );
+        let mcp: Value = serde_json::from_str(&read(&config.join("mcp_config.json"))?)
+            .map_err(|e| SyncError::Invalid(e.to_string()))?;
+        assert_eq!(mcp["mcpServers"]["docs"]["serverUrl"], "https://x/mcp");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn toml_commands_are_copies_whose_edits_come_back() -> Result<()> {
         let tmp = tempfile::tempdir().map_err(io(Path::new(".")))?;
         let home = Home::new(tmp.path().join(".skillpouch"));

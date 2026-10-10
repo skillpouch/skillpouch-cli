@@ -6,7 +6,10 @@
 //! Claude Code <https://docs.claude.com/en/docs/claude-code/settings>,
 //! OpenCode <https://opencode.ai/docs/config/>,
 //! Codex <https://github.com/openai/codex/blob/main/docs/config.md>,
-//! Gemini CLI <https://github.com/google-gemini/gemini-cli/blob/main/docs/get-started/configuration.md>.
+//! Gemini CLI <https://github.com/google-gemini/gemini-cli/blob/main/docs/get-started/configuration.md>,
+//! Antigravity <https://antigravity.google/docs/rules>, <https://antigravity.google/docs/skills>,
+//! <https://antigravity.google/docs/subagents>, <https://antigravity.google/docs/mcp>,
+//! <https://antigravity.google/docs/hooks> (app folders; checked 2026-10-10).
 
 mod config;
 mod files;
@@ -137,6 +140,8 @@ pub struct Places {
     pub opencode: PathBuf,
     pub codex: PathBuf,
     pub gemini: PathBuf,
+    /// `~/.gemini/config`: what Antigravity's app, IDE and CLI share.
+    pub antigravity: PathBuf,
     pub copilot: PathBuf,
     pub cursor: PathBuf,
     pub windsurf: PathBuf,
@@ -159,6 +164,7 @@ impl Places {
             opencode: config.join("opencode"),
             codex: home.join(".codex"),
             gemini: home.join(".gemini"),
+            antigravity: home.join(".gemini/config"),
             copilot: home.join(".copilot"),
             cursor: home.join(".cursor"),
             windsurf: home.join(".codeium/windsurf"),
@@ -211,7 +217,7 @@ pub enum McpFormat {
     Gemini,
     /// `mcpServers`, `type` local/http/sse with `tools` (Copilot CLI).
     Copilot,
-    /// `mcpServers`, `serverUrl` for remote servers (Windsurf).
+    /// `mcpServers`, `serverUrl` for remote servers (Windsurf, Antigravity).
     Windsurf,
 }
 
@@ -280,6 +286,9 @@ pub enum AgentFormat {
     /// `name`, `description`, `model: inherit`, `tools`: `Read`, `Execute`, …
     /// (Factory droids).
     Factory,
+    /// `name`, `description`, `tools` as a list of `view_file`, `run_command`,
+    /// … and only those it knows (Antigravity subagents).
+    Antigravity,
 }
 
 /// How an assistant stores hooks (commands it runs on its own events).
@@ -318,7 +327,9 @@ struct Layout {
     id: &'static str,
     name: &'static str,
     root: PathBuf,
-    instructions: Option<&'static str>,
+    /// Other folders it makes, any of which shows it's here before `root` is.
+    markers: Vec<PathBuf>,
+    instructions: Option<PathBuf>,
     /// Skill folders it reads; links go into the first.
     skills: Vec<PathBuf>,
     /// Shared skill folders it also reads: when another assistant here
@@ -329,6 +340,16 @@ struct Layout {
     hooks: Option<(PathBuf, HookFormat)>,
     /// The config file plugins are turned on in; OpenCode's is its MCP file.
     plugins: Option<(Option<PathBuf>, PluginFormat)>,
+}
+
+impl Layout {
+    /// Its folder, or the first marker, if this computer has it.
+    fn folder(&self) -> Option<&Path> {
+        std::iter::once(&self.root)
+            .chain(&self.markers)
+            .find(|dir| dir.is_dir())
+            .map(PathBuf::as_path)
+    }
 }
 
 /// In the order skills are linked: Claude Code's and Codex's folders are
@@ -359,7 +380,8 @@ fn layouts(places: &Places) -> Vec<Layout> {
             id: "claude-code",
             name: "Claude Code",
             root: places.claude.clone(),
-            instructions: Some("CLAUDE.md"),
+            markers: vec![],
+            instructions: Some(places.claude.join("CLAUDE.md")),
             skills: vec![claude_skills.clone()],
             agents: &["agents"],
             commands: (&["commands"], CommandFormat::Markdown),
@@ -375,7 +397,8 @@ fn layouts(places: &Places) -> Vec<Layout> {
             id: "codex",
             name: "Codex",
             root: places.codex.clone(),
-            instructions: Some("AGENTS.md"),
+            markers: vec![],
+            instructions: Some(places.codex.join("AGENTS.md")),
             skills: vec![shared_skills.clone(), places.codex.join("skills")],
             agents: &[],
             commands: (&["prompts"], CommandFormat::Hinted),
@@ -388,7 +411,8 @@ fn layouts(places: &Places) -> Vec<Layout> {
             id: "opencode",
             name: "OpenCode",
             root: places.opencode.clone(),
-            instructions: Some("AGENTS.md"),
+            markers: vec![],
+            instructions: Some(places.opencode.join("AGENTS.md")),
             // The singular folders are the older names; both still load.
             skills: vec![
                 places.opencode.join("skills"),
@@ -411,7 +435,8 @@ fn layouts(places: &Places) -> Vec<Layout> {
             id: "gemini-cli",
             name: "Gemini CLI",
             root: places.gemini.clone(),
-            instructions: Some("GEMINI.md"),
+            markers: vec![],
+            instructions: Some(places.gemini.join("GEMINI.md")),
             skills: vec![places.gemini.join("skills")],
             agents: &["agents"],
             commands: (&["commands"], CommandFormat::Toml),
@@ -421,10 +446,41 @@ fn layouts(places: &Places) -> Vec<Layout> {
             plugins: None,
         },
         Layout {
+            id: "antigravity",
+            name: "Antigravity",
+            root: places.antigravity.clone(),
+            // Its app data folders, made before anything is customized.
+            markers: ["antigravity", "antigravity-ide", "antigravity-cli"]
+                .iter()
+                .map(|dir| places.gemini.join(dir))
+                .collect(),
+            // The global rules file it shares with Gemini CLI: one link serves
+            // both, and Antigravity doesn't read the instructions twice.
+            instructions: Some(places.gemini.join("GEMINI.md")),
+            // The second is the IDE's older folder. The CLI's own
+            // `antigravity-cli/skills` is left out: moved here, the CLI
+            // wouldn't find them.
+            skills: vec![
+                places.antigravity.join("skills"),
+                places.gemini.join("antigravity").join("skills"),
+            ],
+            agents: &["agents"],
+            // Workflows stop working on 2026-10-19; skills are slash commands.
+            commands: (&[], CommandFormat::Markdown),
+            agent_format: AgentFormat::Antigravity,
+            mcp: Some((
+                vec![places.antigravity.join("mcp_config.json")],
+                McpFormat::Windsurf,
+            )),
+            hooks: None,
+            plugins: None,
+        },
+        Layout {
             id: "copilot",
             name: "Copilot CLI",
             root: places.copilot.clone(),
-            instructions: Some("copilot-instructions.md"),
+            markers: vec![],
+            instructions: Some(places.copilot.join("copilot-instructions.md")),
             skills: vec![places.copilot.join("skills")],
             agents: &["agents"],
             commands: (&[], CommandFormat::Markdown),
@@ -443,6 +499,7 @@ fn layouts(places: &Places) -> Vec<Layout> {
             id: "cursor",
             name: "Cursor",
             root: places.cursor.clone(),
+            markers: vec![],
             instructions: None,
             skills: vec![places.cursor.join("skills")],
             agents: &[],
@@ -456,7 +513,8 @@ fn layouts(places: &Places) -> Vec<Layout> {
             id: "windsurf",
             name: "Windsurf",
             root: places.windsurf.clone(),
-            instructions: Some("memories/global_rules.md"),
+            markers: vec![],
+            instructions: Some(places.windsurf.join("memories/global_rules.md")),
             skills: vec![],
             agents: &[],
             commands: (&["global_workflows"], CommandFormat::Workflow),
@@ -472,7 +530,8 @@ fn layouts(places: &Places) -> Vec<Layout> {
             id: "qwen-code",
             name: "Qwen Code",
             root: places.qwen.clone(),
-            instructions: Some("QWEN.md"),
+            markers: vec![],
+            instructions: Some(places.qwen.join("QWEN.md")),
             skills: vec![],
             agents: &["agents"],
             commands: (&["commands"], CommandFormat::Toml),
@@ -485,6 +544,7 @@ fn layouts(places: &Places) -> Vec<Layout> {
             id: "factory",
             name: "Factory Droid",
             root: places.factory.clone(),
+            markers: vec![],
             instructions: None,
             skills: vec![places.factory.join("skills")],
             agents: &["droids"],
@@ -506,7 +566,8 @@ fn layouts(places: &Places) -> Vec<Layout> {
             id: "crush",
             name: "Crush",
             root: places.crush.clone(),
-            instructions: Some("CRUSH.md"),
+            markers: vec![],
+            instructions: Some(places.crush.join("CRUSH.md")),
             skills: vec![places.crush.join("skills")],
             agents: &[],
             commands: (&[], CommandFormat::Markdown),
@@ -555,12 +616,12 @@ pub struct Target {
 pub fn targets(places: &Places) -> Vec<Target> {
     layouts(places)
         .into_iter()
-        .filter(|layout| layout.root.is_dir())
-        .map(|layout| {
-            let read_only = git_checkout(&layout.root).map(|repo| {
+        .filter_map(|layout| Some((layout.folder()?.to_path_buf(), layout)))
+        .map(|(folder, layout)| {
+            let read_only = git_checkout(&folder).map(|repo| {
                 format!(
                     "{} is part of the git checkout {}, so SkillPouch only reads it",
-                    layout.root.display(),
+                    folder.display(),
                     repo.display()
                 )
             });
@@ -582,7 +643,7 @@ pub fn targets(places: &Places) -> Vec<Target> {
             Target {
                 id: layout.id,
                 name: layout.name,
-                instructions: layout.instructions.map(|file| layout.root.join(file)),
+                instructions: layout.instructions,
                 skills,
                 agents: layout
                     .agents
@@ -613,7 +674,7 @@ pub fn discover(places: &Places) -> Vec<Harness> {
     let own = files::Own::new(&places.skillpouch);
     layouts(places)
         .into_iter()
-        .filter(|layout| layout.root.is_dir())
+        .filter(|layout| layout.folder().is_some())
         .map(|layout| scan(&layout, &own))
         .collect()
 }
@@ -624,20 +685,20 @@ fn scan(layout: &Layout, own: &files::Own) -> Harness {
     let mut add = |item: Item| {
         found.entry((item.kind, item.name.clone())).or_insert(item);
     };
-    if let Some(name) = layout.instructions {
-        let path = layout.root.join(name);
-        if let Some(bytes) = own.file(&path) {
-            let file = path
-                .file_name()
-                .map_or(name.into(), |file| file.to_string_lossy().into_owned());
-            add(Item {
-                kind: Kind::Instructions,
-                name: file,
-                path,
-                files: 1,
-                bytes,
-            });
-        }
+    if let Some(path) = &layout.instructions
+        && let Some(bytes) = own.file(path)
+    {
+        let file = path
+            .file_name()
+            .map(|file| file.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        add(Item {
+            kind: Kind::Instructions,
+            name: file,
+            path: path.clone(),
+            files: 1,
+            bytes,
+        });
     }
     for folder in &layout.skills {
         files::skills(folder, own).into_iter().for_each(&mut add);
@@ -835,6 +896,76 @@ mod tests {
             Some((h.join(".gemini/commands"), CommandFormat::Toml))
         );
         assert!(found.iter().all(|target| target.read_only.is_none()));
+        Ok(())
+    }
+
+    #[test]
+    fn finds_what_antigravity_holds_beside_gemini_cli() -> std::io::Result<()> {
+        let home = tempfile::tempdir()?;
+        let h = home.path();
+        write(&h.join(".gemini/GEMINI.md"), "# Rules")?;
+        // Gemini CLI's own folder alone isn't Antigravity.
+        let ids: Vec<_> = discover(&places(h)).iter().map(|h| h.id).collect();
+        assert_eq!(ids, ["gemini-cli"]);
+
+        let config = h.join(".gemini/config");
+        write(&config.join("skills/review/SKILL.md"), "# Review")?;
+        write(&h.join(".gemini/antigravity/skills/old/SKILL.md"), "# Old")?;
+        write(
+            &h.join(".gemini/antigravity-cli/skills/cli/SKILL.md"),
+            "# CLI",
+        )?;
+        write(&config.join("agents/auditor.md"), "---\nname: auditor\n---")?;
+        write(
+            &config.join("mcp_config.json"),
+            r#"{"mcpServers":{"docs":{"serverUrl":"https://x/mcp"},"db":{"command":"db"}}}"#,
+        )?;
+        let found = discover(&places(h));
+        let ids: Vec<_> = found.iter().map(|h| h.id).collect();
+        assert_eq!(ids, ["gemini-cli", "antigravity"]);
+        let antigravity = &found[1];
+        assert_eq!(antigravity.name, "Antigravity");
+        assert_eq!(names(antigravity, Kind::Instructions), ["GEMINI.md"]);
+        assert_eq!(names(antigravity, Kind::Skill), ["old", "review"]);
+        assert_eq!(names(antigravity, Kind::Agent), ["auditor"]);
+        assert_eq!(names(antigravity, Kind::McpServer), ["db", "docs"]);
+        assert_eq!(names(antigravity, Kind::Command), Vec::<&str>::new());
+        // Gemini CLI doesn't read Antigravity's folders.
+        assert_eq!(names(&found[0], Kind::Skill), Vec::<&str>::new());
+        Ok(())
+    }
+
+    #[test]
+    fn antigravity_is_a_target_once_one_of_its_apps_ran() -> std::io::Result<()> {
+        let home = tempfile::tempdir()?;
+        let h = home.path();
+        fs::create_dir_all(h.join(".gemini/antigravity-ide"))?;
+        let found = targets(&places(h));
+        let ids: Vec<_> = found.iter().map(|t| t.id).collect();
+        assert_eq!(ids, ["gemini-cli", "antigravity"]);
+        let (gemini, antigravity) = (&found[0], &found[1]);
+        // One instructions file for both, so it's linked once.
+        assert_eq!(antigravity.instructions, Some(h.join(".gemini/GEMINI.md")));
+        assert_eq!(antigravity.instructions, gemini.instructions);
+        let config = h.join(".gemini/config");
+        assert_eq!(antigravity.root, config);
+        assert_eq!(antigravity.skills, Some(config.join("skills")));
+        assert_eq!(
+            antigravity.agents,
+            Some((config.join("agents"), AgentFormat::Antigravity))
+        );
+        assert_eq!(antigravity.commands, None);
+        assert_eq!(
+            antigravity.mcp,
+            Some((config.join("mcp_config.json"), McpFormat::Windsurf))
+        );
+        assert_eq!((&antigravity.hooks, &antigravity.plugins), (&None, &None));
+        assert_eq!(antigravity.read_only, None);
+        assert!(known().contains(&("antigravity", "Antigravity")));
+        assert_eq!(
+            formats("antigravity"),
+            Some((AgentFormat::Antigravity, CommandFormat::Markdown))
+        );
         Ok(())
     }
 

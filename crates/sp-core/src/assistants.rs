@@ -12,10 +12,17 @@ const KNOWN: &[(&str, &str, &[&str])] = &[
     ("cursor", "Cursor", &[".cursor"]),
     ("windsurf", "Windsurf", &[".codeium/windsurf"]),
     ("copilot", "GitHub Copilot", &[".copilot"]),
+    // Its app data folders and shared settings
+    // (<https://antigravity.google/docs/hooks>, <https://antigravity.google/docs/mcp>).
     (
         "antigravity",
         "Antigravity",
-        &[".antigravity", ".gemini/antigravity"],
+        &[
+            ".gemini/antigravity",
+            ".gemini/antigravity-ide",
+            ".gemini/antigravity-cli",
+            ".gemini/config",
+        ],
     ),
 ];
 
@@ -82,6 +89,16 @@ mod tests {
         assert!(scanned[1].installed && !scanned[2].installed);
         assert_eq!(scanned.len(), KNOWN.len());
         assert_eq!(name_of("gemini-cli"), Some("Gemini CLI"));
+        std::fs::create_dir_all(dir.join(".gemini/antigravity-cli"))?;
+        assert_eq!(
+            detect(&dir),
+            ["claude-code", "opencode", "gemini-cli", "antigravity"]
+        );
+        let antigravity = scan(&dir).into_iter().find(|a| a.id == "antigravity");
+        assert_eq!(
+            antigravity.map(|a| (a.folder, a.installed)),
+            Some((".gemini/antigravity-cli", true))
+        );
         std::fs::remove_dir_all(&dir)
     }
 }

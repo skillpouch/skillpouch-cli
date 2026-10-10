@@ -61,7 +61,7 @@ fn json_servers(map: &serde_json::Map<String, serde_json::Value>) -> Vec<String>
         let Some(fields) = server.as_object() else {
             continue;
         };
-        let defines = ["type", "command", "url", "httpUrl"]
+        let defines = ["type", "command", "url", "httpUrl", "serverUrl"]
             .iter()
             .any(|field| fields.contains_key(*field));
         if name == "servers" && !defines {
@@ -181,6 +181,13 @@ mod tests {
         // A server that happens to be called `servers` is still one.
         assert_eq!(
             json_keys(r#"{"mcp":{"servers":{"type":"local"}}}"#, "mcp"),
+            ["servers"]
+        );
+        assert_eq!(
+            json_keys(
+                r#"{"mcpServers":{"servers":{"serverUrl":"https://x"}}}"#,
+                "mcpServers"
+            ),
             ["servers"]
         );
     }

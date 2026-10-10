@@ -50,7 +50,7 @@ Use `skillpouch --help` or `skillpouch <command> --help` for current options.
 
 ## What it brings together
 
-The CLI detects Claude Code, Codex, OpenCode, Gemini CLI, Copilot CLI, Cursor, Windsurf, Qwen Code, Factory Droid and Crush. Depending on the assistant and its formats, SkillPouch can sync skills, agent definitions, instruction and command files, MCP server configurations, hooks, plugins and marketplace references. Shared skills folders are also recognized. Coverage differs by item type and assistant; the source of truth is [`sp-harness`](crates/sp-harness).
+The CLI detects Claude Code, Codex, OpenCode, Gemini CLI, Antigravity, Copilot CLI, Cursor, Windsurf, Qwen Code, Factory Droid and Crush. Depending on the assistant and its formats, SkillPouch can sync skills, agent definitions, instruction and command files, MCP server configurations, hooks, plugins and marketplace references. Shared skills folders are also recognized. Coverage differs by item type and assistant; the source of truth is [`sp-harness`](crates/sp-harness).
 
 The pouch is kept as ordinary files on the computer. The CLI links supported assistant locations to those files, translates supported formats where necessary, and backs up files before replacing links. Turn off an assistant or unlink a computer and linked files are released as regular files so assistants can continue to use them.
 

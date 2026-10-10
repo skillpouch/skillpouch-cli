@@ -190,7 +190,8 @@ fn unquote(raw: &str) -> String {
 }
 
 /// Claude Code's tools and what each assistant calls them:
-/// (Claude, OpenCode, Gemini CLI, Copilot CLI, Factory).
+/// (Claude, OpenCode, Gemini CLI, Copilot CLI, Factory, Antigravity).
+/// Antigravity's are the ones <https://antigravity.google/docs/hooks> lists.
 const TOOLS: [ToolRow; 11] = [
     (
         "Read",
@@ -198,6 +199,7 @@ const TOOLS: [ToolRow; 11] = [
         Some("read_file"),
         Some("read"),
         Some("Read"),
+        Some("view_file"),
     ),
     (
         "Write",
@@ -205,6 +207,7 @@ const TOOLS: [ToolRow; 11] = [
         Some("write_file"),
         Some("edit"),
         Some("Create"),
+        Some("write_to_file"),
     ),
     (
         "Edit",
@@ -212,6 +215,7 @@ const TOOLS: [ToolRow; 11] = [
         Some("replace"),
         Some("edit"),
         Some("Edit"),
+        Some("replace_file_content"),
     ),
     (
         "MultiEdit",
@@ -219,6 +223,7 @@ const TOOLS: [ToolRow; 11] = [
         Some("replace"),
         Some("edit"),
         Some("Edit"),
+        Some("multi_replace_file_content"),
     ),
     (
         "Bash",
@@ -226,6 +231,7 @@ const TOOLS: [ToolRow; 11] = [
         Some("run_shell_command"),
         Some("shell"),
         Some("Execute"),
+        Some("run_command"),
     ),
     (
         "Grep",
@@ -233,6 +239,7 @@ const TOOLS: [ToolRow; 11] = [
         Some("search_file_content"),
         Some("search"),
         Some("Grep"),
+        Some("grep_search"),
     ),
     (
         "Glob",
@@ -240,6 +247,7 @@ const TOOLS: [ToolRow; 11] = [
         Some("glob"),
         Some("search"),
         Some("Glob"),
+        Some("find_by_name"),
     ),
     (
         "LS",
@@ -247,6 +255,7 @@ const TOOLS: [ToolRow; 11] = [
         Some("list_directory"),
         Some("search"),
         Some("LS"),
+        Some("list_dir"),
     ),
     (
         "WebFetch",
@@ -254,6 +263,7 @@ const TOOLS: [ToolRow; 11] = [
         Some("web_fetch"),
         Some("web"),
         Some("FetchUrl"),
+        Some("read_url_content"),
     ),
     (
         "WebSearch",
@@ -261,6 +271,7 @@ const TOOLS: [ToolRow; 11] = [
         Some("google_web_search"),
         Some("web"),
         Some("WebSearch"),
+        Some("search_web"),
     ),
     (
         "TodoWrite",
@@ -268,6 +279,7 @@ const TOOLS: [ToolRow; 11] = [
         Some("write_todos"),
         Some("todo"),
         Some("TodoWrite"),
+        None,
     ),
 ];
 
@@ -292,6 +304,7 @@ type ToolRow = (
     Option<&'static str>,
     Option<&'static str>,
     Option<&'static str>,
+    Option<&'static str>,
 );
 
 fn column(format: AgentFormat, row: &ToolRow) -> Option<&'static str> {
@@ -301,6 +314,7 @@ fn column(format: AgentFormat, row: &ToolRow) -> Option<&'static str> {
         AgentFormat::Gemini => row.2,
         AgentFormat::Copilot => row.3,
         AgentFormat::Factory => row.4,
+        AgentFormat::Antigravity => row.5,
     }
 }
 
@@ -325,9 +339,14 @@ fn tools_to(format: AgentFormat, tools: &[String]) -> Vec<String> {
             .iter()
             .find(|row| row.0.eq_ignore_ascii_case(tool))
             .and_then(|row| column(format, row))
-            .map(str::to_string)
-            // A tool only Claude knows (an MCP tool, `Task`) keeps its name.
-            .unwrap_or_else(|| tool.clone());
+            .map(str::to_string);
+        // A tool only Claude knows (an MCP tool, `Task`) keeps its name,
+        // except in Antigravity: a tool name it doesn't know hangs the agent.
+        let Some(native) =
+            native.or_else(|| (format != AgentFormat::Antigravity).then(|| tool.clone()))
+        else {
+            continue;
+        };
         if !out.contains(&native) {
             out.push(native);
         }
@@ -448,6 +467,23 @@ pub fn agent_to(format: AgentFormat, neutral: &str, name: &str) -> String {
                 front.push(("tools".into(), Value::List(tools_to(format, &tools))));
             }
         }
+        AgentFormat::Antigravity => {
+            front.push((
+                "name".into(),
+                Value::Text(doc.text("name").unwrap_or_else(|| name.to_string())),
+            ));
+            front.push(("description".into(), Value::Text(description)));
+            if let Some(model) = doc
+                .text("model")
+                .filter(|m| matches!(m.as_str(), "inherit" | "flash" | "pro"))
+            {
+                front.push(("model".into(), Value::Text(model)));
+            }
+            let tools = tools.map(|tools| tools_to(format, &tools));
+            if let Some(tools) = tools.filter(|tools| !tools.is_empty()) {
+                front.push(("tools".into(), Value::List(tools)));
+            }
+        }
         AgentFormat::Claude => {}
     }
     Doc {
@@ -481,6 +517,18 @@ pub fn agent_from(format: AgentFormat, native: &str, current: &str, name: &str) 
     }
     let tools = native_tools(format, &edited);
     if tools != native_tools(format, &was) {
+        // Antigravity never saw the tools it doesn't know: they stay.
+        let unseen = claude_tools(&doc)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|tool| {
+                format == AgentFormat::Antigravity
+                    && tools_to(format, std::slice::from_ref(tool)).is_empty()
+            });
+        let tools = tools.map(|mut tools| {
+            tools.extend(unseen);
+            tools
+        });
         doc.set("tools", tools.map(|tools| Value::Text(tools.join(", "))));
     }
     doc.body = edited.body;
@@ -595,6 +643,35 @@ mod tests {
             "{copilot}"
         );
         assert_eq!(agent_to(AgentFormat::Claude, AGENT, "reviewer"), AGENT);
+        let antigravity = agent_to(AgentFormat::Antigravity, AGENT, "reviewer");
+        assert_eq!(
+            antigravity,
+            "---\nname: reviewer\ndescription: Reviews diffs before merging\ntools:\n  - view_file\n  - grep_search\n  - find_by_name\n  - run_command\n---\n\nYou review code.\n"
+        );
+    }
+
+    #[test]
+    fn antigravity_agents_only_get_tools_it_knows() {
+        let agent = "---\nname: planner\ndescription: Plans\ntools: Read, Task, mcp__github__search, TodoWrite\nmodel: pro\n---\n\nPlan.\n";
+        let native = agent_to(AgentFormat::Antigravity, agent, "planner");
+        assert!(
+            native.contains("model: pro\ntools:\n  - view_file\n---"),
+            "{native}"
+        );
+        // Nothing it knows: no list, rather than one that hangs the agent.
+        let none = agent_to(
+            AgentFormat::Antigravity,
+            "---\nname: a\ndescription: A\ntools: Task\nmodel: opus\n---\nA\n",
+            "a",
+        );
+        assert!(!none.contains("tools") && !none.contains("model"), "{none}");
+        // Its own tool names come back as Claude's; the ones it never saw stay.
+        let edited = native.replace("  - view_file\n", "  - view_file\n  - run_command\n");
+        let back = agent_from(AgentFormat::Antigravity, &edited, agent, "planner");
+        assert!(
+            back.contains("tools: Read, Bash, Task, mcp__github__search, TodoWrite\n"),
+            "{back}"
+        );
     }
 
     #[test]
@@ -604,6 +681,7 @@ mod tests {
             AgentFormat::Gemini,
             AgentFormat::Copilot,
             AgentFormat::Factory,
+            AgentFormat::Antigravity,
         ] {
             let native = agent_to(format, AGENT, "reviewer");
             assert_eq!(

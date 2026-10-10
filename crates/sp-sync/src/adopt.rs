@@ -26,7 +26,7 @@ pub fn format_of(harness_id: &str) -> McpFormat {
         "codex" => McpFormat::Codex,
         "gemini-cli" | "qwen-code" => McpFormat::Gemini,
         "copilot" => McpFormat::Copilot,
-        "windsurf" => McpFormat::Windsurf,
+        "windsurf" | "antigravity" => McpFormat::Windsurf,
         _ => McpFormat::Claude,
     }
 }
@@ -342,6 +342,53 @@ mod tests {
         let adopted = adopt(&pouch, &found, false, Some(&h.join("backups")))?;
         assert!(adopted.backed_up.is_empty());
         assert!(h.join(".claude/CLAUDE.md").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn antigravity_items_come_in_once_beside_gemini_cli() -> Result<()> {
+        let tmp = tempfile::tempdir().map_err(io(Path::new(".")))?;
+        let h = tmp.path();
+        touch(&h.join(".gemini/GEMINI.md"), "# Rules")?;
+        touch(
+            &h.join(".gemini/config/agents/auditor.md"),
+            "---\nname: auditor\ndescription: Audits\ntools:\n  - view_file\n  - run_command\n---\n\nAudit.\n",
+        )?;
+        touch(
+            &h.join(".gemini/config/mcp_config.json"),
+            r#"{"mcpServers":{"docs":{"serverUrl":"https://x/mcp","headers":{"A":"b"}}}}"#,
+        )?;
+        let found: Vec<Found> = sp_harness::discover(&places(h))
+            .iter()
+            .flat_map(found_in)
+            .collect();
+        let names: Vec<String> = found
+            .iter()
+            .map(|f| item::key(&f.item.kind, &f.item.name))
+            .collect();
+        // GEMINI.md is both assistants'.
+        assert_eq!(
+            names,
+            [
+                "instructions/instructions",
+                "instructions/instructions",
+                "agent/auditor",
+                "mcp_server/docs"
+            ]
+        );
+        let agent = String::from_utf8_lossy(&found[2].item.files["AGENT.md"].bytes).into_owned();
+        assert!(agent.contains("tools: Read, Bash\n"), "{agent}");
+        let server: serde_json::Value =
+            serde_json::from_slice(&found[3].item.files["server.json"].bytes).unwrap_or_default();
+        assert_eq!(
+            (server["type"].as_str(), server["url"].as_str()),
+            (Some("http"), Some("https://x/mcp"))
+        );
+
+        let pouch = PouchDir::new(h.join("pouch"));
+        let adopted = adopt(&pouch, &found, false, Some(&h.join("backups")))?;
+        assert_eq!((adopted.added, adopted.copies), (3, 0));
+        assert_eq!(adopted.backed_up.len(), 2);
         Ok(())
     }
 
