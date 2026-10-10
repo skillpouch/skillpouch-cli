@@ -5,7 +5,10 @@ use crate::{CoreError, Home, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const DEFAULT_API_URL: &str = "https://skillpouch.net";
+pub const DEFAULT_API_URL: &str = "https://app.skillpouch.net";
+
+/// The app's earlier origin, now the static landing page.
+const OLD_API_URL: &str = "https://skillpouch.net";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -61,10 +64,18 @@ impl Config {
             path: path.clone(),
             message: "not UTF-8".into(),
         })?;
-        toml::from_str(&text).map_err(|error| CoreError::Invalid {
+        let mut config: Self = toml::from_str(&text).map_err(|error| CoreError::Invalid {
             path,
             message: error.message().to_string(),
-        })
+        })?;
+        if config
+            .api_url
+            .as_deref()
+            .is_some_and(|url| url.trim_end_matches('/') == OLD_API_URL)
+        {
+            config.api_url = Some(DEFAULT_API_URL.to_string());
+        }
+        Ok(config)
     }
 
     pub fn save(&self, home: &Home) -> Result<()> {
@@ -77,7 +88,7 @@ impl Config {
         write_private(&path, text.as_bytes())
     }
 
-    /// `$SKILLPOUCH_API_URL`, else the file, else skillpouch.net. No trailing slash.
+    /// `$SKILLPOUCH_API_URL`, else the file, else app.skillpouch.net. No trailing slash.
     pub fn api_url(&self) -> String {
         let from_env = std::env::var("SKILLPOUCH_API_URL")
             .ok()
@@ -114,6 +125,26 @@ mod tests {
         assert!(!config.sync.assistant_on("codex") && config.sync.kind_on("skill"));
         let text = std::fs::read_to_string(home.config_file()).unwrap_or_default();
         assert!(text.contains("[sync]"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn moves_the_old_origin_to_the_app_host() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("sp-config-old-{}", std::process::id()));
+        let home = Home::new(&dir);
+        home.ensure_private_dir(home.root())?;
+        for (saved, loaded) in [
+            ("https://skillpouch.net", DEFAULT_API_URL),
+            ("https://skillpouch.net/", DEFAULT_API_URL),
+            ("https://self.example.com", "https://self.example.com"),
+        ] {
+            write_private(
+                &home.config_file(),
+                format!("api_url = \"{saved}\"\n").as_bytes(),
+            )?;
+            assert_eq!(Config::load(&home)?.api_url.as_deref(), Some(loaded));
+        }
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
