@@ -31,3 +31,6 @@ tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "signal",
 [dev-dependencies]
 assert_cmd = "2.2.2"
 tempfile = "3.27.0"
+
+[build-dependencies]
+winresource = { version = "0.1.31", default-features = false }
