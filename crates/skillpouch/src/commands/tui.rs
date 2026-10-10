@@ -85,18 +85,18 @@ async fn serve(
     let reported = Arc::new(Reported::default());
     // Setup is offered once per run; skipped, it waits for the Account tab.
     let offered = Arc::new(AtomicBool::new(false));
-    let starting = Arc::clone(&ctx);
+    // The background sync starts before any update: on Windows updating
+    // stops it and starts it again, which mustn't cross with this start.
+    let (starting, told) = (Arc::clone(&ctx), updates.clone());
     tokio::spawn(async move {
-        let _ = tokio::task::spawn_blocking(move || daemon::ensure_running(&starting)).await;
-    });
-    let watcher = tokio::spawn(watch_sync(Arc::clone(&ctx), updates.clone()));
-    let (updating, told) = (Arc::clone(&ctx), updates.clone());
-    tokio::spawn(async move {
-        crate::update::in_dashboard(&updating, |step| {
+        let started = Arc::clone(&starting);
+        let _ = tokio::task::spawn_blocking(move || daemon::ensure_running(&started)).await;
+        crate::update::in_dashboard(&starting, |step| {
             let _ = told.send(Update::Upgrade(step));
         })
         .await;
     });
+    let watcher = tokio::spawn(watch_sync(Arc::clone(&ctx), updates.clone()));
 
     while let Some(request) = requests.recv().await {
         match request {

@@ -458,14 +458,16 @@ pub(crate) mod tests {
             footer.contains("Updating SkillPouch to 0.2.3…"),
             "{installing}"
         );
-        app.apply(Update::Upgrade(Upgrade::Failed(
-            "EBUSY: resource busy".into(),
-        )));
+        app.apply(Update::Upgrade(Upgrade::Failed {
+            reason: "SkillPouch is in use".into(),
+            hint: Some("Quit, then run `npm i -g skillpouch`.".into()),
+        }));
         let failed = screen(&app, 110, 34);
         let footer = failed.lines().last().unwrap_or_default();
         assert!(
-            footer.contains("Couldn't update: EBUSY: resource busy")
-                && !footer.contains("Updating"),
+            footer.contains(
+                "Couldn't update: SkillPouch is in use. Quit, then run `npm i -g skillpouch`."
+            ) && !footer.contains("Updating"),
             "{failed}"
         );
         // Also behind the login screen.

@@ -280,23 +280,20 @@ pub async fn before_command(ctx: &Context) -> Option<ExitCode> {
     let installer = installer(&exe)?;
     let now = crate::context::unix_now();
     let latest = pending(ctx, now, Asker::Command).await?;
-    if cfg!(windows) {
-        // Windows won't let a running program be replaced.
-        ui::hint(format!(
-            "SkillPouch {latest} is out. Update with `{}`.",
-            installer.manager.install_line()
-        ));
-        remember_failure(ctx, &latest, now);
-        return None;
-    }
     let line = installer.manager.install_line();
     let spinner = ui::Spinner::start(format!("Updating SkillPouch {VERSION} → {latest}…"));
-    let result = install(installer, &latest).await;
+    let result = install(ctx, installer, &latest, LOCKED_WHILE_RUNNING).await;
     spinner.clear();
     if let Err(error) = result {
         remember_failure(ctx, &latest, now);
         ui::warn(format!("Couldn't update to {latest}: {error}"));
-        ui::hint(format!("Update by hand with `{line}`."));
+        if LOCKED_WHILE_RUNNING && in_use(&error) {
+            ui::hint(format!(
+                "SkillPouch was in use. Update by hand with `{line}` once this command is done."
+            ));
+        } else {
+            ui::hint(format!("Update by hand with `{line}`."));
+        }
         return None;
     }
     ui::success(format!("Updated to SkillPouch {latest}."));
@@ -319,11 +316,75 @@ pub fn run_again() -> ExitCode {
     }
 }
 
-async fn install(installer: Installer, version: &str) -> Result<(), String> {
-    let version = version.to_string();
-    tokio::task::spawn_blocking(move || installer.install(&version))
-        .await
-        .unwrap_or_else(|error| Err(error.to_string()))
+/// Windows won't let a running program be replaced.
+const LOCKED_WHILE_RUNNING: bool = cfg!(windows);
+
+/// What installing a new version takes, apart so the order can be tested.
+trait Steps {
+    fn stop_sync(&mut self);
+    fn install(&mut self, version: &str) -> Result<(), String>;
+    fn start_sync(&mut self);
+}
+
+/// Installs `version`. With `free_program` the background sync lets go of
+/// the program first, and starts again afterwards on whichever version is
+/// then installed, whether the install worked or not.
+fn install_with(steps: &mut impl Steps, version: &str, free_program: bool) -> Result<(), String> {
+    if free_program {
+        steps.stop_sync();
+    }
+    let result = steps.install(version);
+    if free_program {
+        steps.start_sync();
+    }
+    result
+}
+
+struct OnThisComputer<'a> {
+    ctx: &'a Context,
+    installer: Installer,
+}
+
+impl Steps for OnThisComputer<'_> {
+    fn stop_sync(&mut self) {
+        let _ = crate::daemon::stop(self.ctx);
+    }
+
+    fn install(&mut self, version: &str) -> Result<(), String> {
+        self.installer.install(version)
+    }
+
+    fn start_sync(&mut self) {
+        crate::daemon::ensure_running(self.ctx);
+    }
+}
+
+async fn install(
+    ctx: &Context,
+    installer: Installer,
+    version: &str,
+    free_program: bool,
+) -> Result<(), String> {
+    tokio::task::block_in_place(|| {
+        install_with(
+            &mut OnThisComputer { ctx, installer },
+            version,
+            free_program,
+        )
+    })
+}
+
+/// The package manager couldn't replace a program in use (Windows).
+fn in_use(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    [
+        "ebusy",
+        "eperm",
+        "resource busy",
+        "being used by another process",
+    ]
+    .iter()
+    .any(|sign| error.contains(sign))
 }
 
 /// Behind the dashboard, which opens without waiting: installs a newer
@@ -343,13 +404,23 @@ pub async fn in_dashboard(ctx: &Context, tell: impl Fn(Upgrade)) {
         return tell(Upgrade::UpToDate);
     };
     tell(Upgrade::Installing(latest.clone()));
-    // On Windows the running program may be locked; then it says so and
-    // tries again another day.
-    match install(installer, &latest).await {
+    let line = installer.manager.install_line();
+    match install(ctx, installer, &latest, LOCKED_WHILE_RUNNING).await {
         Ok(()) => tell(Upgrade::Installed(latest)),
         Err(error) => {
             remember_failure(ctx, &latest, now);
-            tell(Upgrade::Failed(error));
+            // On Windows this very program can still be in the way.
+            tell(if LOCKED_WHILE_RUNNING && in_use(&error) {
+                Upgrade::Failed {
+                    reason: "SkillPouch is in use".into(),
+                    hint: Some(format!("Quit, then run `{line}`.")),
+                }
+            } else {
+                Upgrade::Failed {
+                    reason: error,
+                    hint: None,
+                }
+            });
         }
     }
 }
@@ -367,7 +438,7 @@ pub async fn in_background(ctx: &Context, log: &crate::daemon::Log) -> bool {
     let Some(latest) = pending(ctx, now, Asker::Background).await else {
         return false;
     };
-    match install(installer, &latest).await {
+    match install(ctx, installer, &latest, false).await {
         Ok(()) => {
             log.line(&format!("updated to {latest}"));
             true
@@ -408,6 +479,68 @@ mod tests {
         // Commands at the terminal stay quick: every six hours.
         assert!(!Asker::Command.due(checked, checked + 5 * hour));
         assert!(Asker::Command.due(checked, checked + 6 * hour));
+    }
+
+    /// Writes down each step instead of taking it.
+    struct Recorded {
+        steps: Vec<String>,
+        fails: bool,
+    }
+
+    impl Steps for Recorded {
+        fn stop_sync(&mut self) {
+            self.steps.push("stop sync".into());
+        }
+
+        fn install(&mut self, version: &str) -> Result<(), String> {
+            self.steps.push(format!("install {version}"));
+            if self.fails {
+                Err("npm error code EBUSY".into())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn start_sync(&mut self) {
+            self.steps.push("start sync".into());
+        }
+    }
+
+    #[test]
+    fn on_windows_the_sync_lets_go_of_the_program_while_it_installs() {
+        let mut recorded = Recorded {
+            steps: Vec::new(),
+            fails: false,
+        };
+        assert_eq!(install_with(&mut recorded, "0.3.0", true), Ok(()));
+        assert_eq!(recorded.steps, ["stop sync", "install 0.3.0", "start sync"]);
+        // Failed or not, it syncs again afterwards.
+        let mut recorded = Recorded {
+            steps: Vec::new(),
+            fails: true,
+        };
+        assert!(install_with(&mut recorded, "0.3.0", true).is_err());
+        assert_eq!(recorded.steps, ["stop sync", "install 0.3.0", "start sync"]);
+        // Elsewhere (and in the background sync itself) it just installs.
+        let mut recorded = Recorded {
+            steps: Vec::new(),
+            fails: false,
+        };
+        assert_eq!(install_with(&mut recorded, "0.3.0", false), Ok(()));
+        assert_eq!(recorded.steps, ["install 0.3.0"]);
+    }
+
+    #[test]
+    fn tells_a_program_in_use_from_other_failures() {
+        assert!(in_use(
+            "npm error code EBUSY: resource busy or locked, rename 'C:\\…\\skillpouch.exe'"
+        ));
+        assert!(in_use("npm error code EPERM"));
+        assert!(in_use(
+            "The process cannot access the file because it is being used by another process."
+        ));
+        assert!(!in_use("npm error code E404"));
+        assert!(!in_use("npm error code EACCES: permission denied"));
     }
 
     #[test]

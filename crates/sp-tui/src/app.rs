@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 /// How long a notice stays in the footer.
 const NOTICE_FOR: Duration = Duration::from_secs(5);
+/// A notice that says what to do stays longer.
+const HINT_FOR: Duration = Duration::from_secs(15);
 /// Why an update failed is cut to this many characters in the footer.
 const REASON_MAX: usize = 60;
 
@@ -123,6 +125,7 @@ pub struct App {
     pub setup: Option<Setup>,
     /// Asking before logging out.
     pub confirm_logout: bool,
+    /// The notice in the footer, and until when.
     notice: Option<(Notice, Instant)>,
     /// Looking for or installing a new SkillPouch, shown in the footer.
     upgrade: Option<Upgrade>,
@@ -158,7 +161,7 @@ impl App {
         if self
             .notice
             .as_ref()
-            .is_some_and(|(_, since)| since.elapsed() > NOTICE_FOR)
+            .is_some_and(|(_, until)| Instant::now() > *until)
         {
             self.notice = None;
         }
@@ -194,12 +197,18 @@ impl App {
             Upgrade::Checking | Upgrade::Installing(_) => self.upgrade = Some(step),
             Upgrade::Installed(version) => self.restart = Some(version),
             Upgrade::UpToDate => {}
-            Upgrade::Failed(reason) => {
+            Upgrade::Failed { reason, hint } => {
                 let mut short: String = reason.chars().take(REASON_MAX).collect();
                 if short.len() < reason.len() {
                     short.push('…');
                 }
-                self.show(Notice::error(format!("Couldn't update: {short}")));
+                match hint {
+                    Some(hint) => self.show_for(
+                        Notice::error(format!("Couldn't update: {short}. {hint}")),
+                        HINT_FOR,
+                    ),
+                    None => self.show(Notice::error(format!("Couldn't update: {short}"))),
+                }
             }
         }
     }
@@ -319,7 +328,11 @@ impl App {
     }
 
     fn show(&mut self, notice: Notice) {
-        self.notice = Some((notice, Instant::now()));
+        self.show_for(notice, NOTICE_FOR);
+    }
+
+    fn show_for(&mut self, notice: Notice, duration: Duration) {
+        self.notice = Some((notice, Instant::now() + duration));
     }
 
     fn start_login(&mut self) -> Outcome {
@@ -1013,10 +1026,13 @@ pub(crate) mod tests {
         assert_eq!(app.notice(), None);
 
         app.apply(Update::Upgrade(Upgrade::Installing("0.2.3".into())));
-        app.apply(Update::Upgrade(Upgrade::Failed(format!(
-            "npm error code EBUSY: resource busy or locked {}",
-            "x".repeat(80)
-        ))));
+        app.apply(Update::Upgrade(Upgrade::Failed {
+            reason: format!(
+                "npm error code ENOTFOUND: request to the registry failed {}",
+                "x".repeat(80)
+            ),
+            hint: None,
+        }));
         assert_eq!(app.upgrade_status(), None);
         assert_eq!(app.restart, None);
         let notice = app.notice().cloned();
@@ -1024,11 +1040,44 @@ pub(crate) mod tests {
             notice
                 .as_ref()
                 .is_some_and(|n| n.tone == crate::model::Tone::Error
-                    && n.text.starts_with("Couldn't update: npm error code EBUSY")
+                    && n.text
+                        .starts_with("Couldn't update: npm error code ENOTFOUND")
                     && n.text.ends_with('…')
                     && n.text.chars().count() == "Couldn't update: ".len() + REASON_MAX + 1),
             "{notice:?}"
         );
+        assert!(
+            app.notice
+                .as_ref()
+                .is_some_and(|(_, until)| *until <= Instant::now() + NOTICE_FOR)
+        );
+    }
+
+    #[test]
+    fn a_program_in_use_says_what_to_do_and_stays_longer() {
+        let mut app = ready();
+        app.apply(Update::Upgrade(Upgrade::Installing("0.2.3".into())));
+        app.apply(Update::Upgrade(Upgrade::Failed {
+            reason: "SkillPouch is in use".into(),
+            hint: Some("Quit, then run `npm i -g skillpouch`.".into()),
+        }));
+        assert_eq!(app.restart, None);
+        assert_eq!(
+            app.notice().map(|n| n.text.as_str()),
+            Some("Couldn't update: SkillPouch is in use. Quit, then run `npm i -g skillpouch`.")
+        );
+        assert!(
+            app.notice
+                .as_ref()
+                .is_some_and(|(_, until)| *until > Instant::now() + NOTICE_FOR)
+        );
+        // Still there after a short notice would have gone.
+        app.notice = app
+            .notice
+            .take()
+            .map(|(notice, until)| (notice, until - NOTICE_FOR - Duration::from_secs(1)));
+        app.tick();
+        assert!(app.notice().is_some());
     }
 
     #[test]

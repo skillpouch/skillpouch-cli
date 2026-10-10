@@ -229,8 +229,11 @@ pub enum Upgrade {
     Installed(String),
     /// Nothing newer, or nothing worth trying now.
     UpToDate,
-    /// Why it couldn't be installed.
-    Failed(String),
+    /// Why it couldn't be installed, and what to do about it.
+    Failed {
+        reason: String,
+        hint: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
