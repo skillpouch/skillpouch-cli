@@ -2731,7 +2731,7 @@ checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
 
 [[package]]
 name = "skillpouch"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2778,7 +2778,7 @@ dependencies = [
 
 [[package]]
 name = "sp-api"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "blake3",
  "reqwest",
@@ -2794,7 +2794,7 @@ dependencies = [
 
 [[package]]
 name = "sp-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "dirs",
  "serde",
@@ -2805,7 +2805,7 @@ dependencies = [
 
 [[package]]
 name = "sp-crypto"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -2823,7 +2823,7 @@ dependencies = [
 
 [[package]]
 name = "sp-harness"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -2833,7 +2833,7 @@ dependencies = [
 
 [[package]]
 name = "sp-sync"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "blake3",
  "serde",
@@ -2853,7 +2853,7 @@ dependencies = [
 
 [[package]]
 name = "sp-tui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "ratatui",
  "sp-harness",
@@ -2862,7 +2862,7 @@ dependencies = [
 
 [[package]]
 name = "sp-usage"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "blake3",
  "machine-uid",

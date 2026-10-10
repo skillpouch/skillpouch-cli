@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.2](https://github.com/skillpouch/skillpouch-cli/compare/v0.2.1...v0.2.2) (2026-10-10)
+
+### Bug fixes
+
+* **sync:** the background sync restarts itself when the server url or installed version changes ([cb4b84b](https://github.com/skillpouch/skillpouch-cli/commit/cb4b84be04352d3a9b0848ef1890659c52ac4539))
+
 ## [0.2.1](https://github.com/skillpouch/skillpouch-cli/compare/v0.2.0...v0.2.1) (2026-10-10)
 
 ### Bug fixes
