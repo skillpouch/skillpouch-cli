@@ -62,7 +62,9 @@ pub async fn run(ctx: Context) -> Result<ExitCode> {
     });
     drop(requests);
     let _ = tokio::time::timeout(CANCEL_GRACE, worker).await;
-    shown?;
+    if shown? == sp_tui::Closed::Restart {
+        return Ok(crate::update::run_again());
+    }
     if crate::update::exe().is_some_and(|exe| crate::update::temporary(&exe)) {
         crate::ui::warn(
             "This is a temporary copy of SkillPouch (from npx), so nothing syncs in the background.",
@@ -88,6 +90,13 @@ async fn serve(
         let _ = tokio::task::spawn_blocking(move || daemon::ensure_running(&starting)).await;
     });
     let watcher = tokio::spawn(watch_sync(Arc::clone(&ctx), updates.clone()));
+    let (updating, told) = (Arc::clone(&ctx), updates.clone());
+    tokio::spawn(async move {
+        crate::update::in_dashboard(&updating, |step| {
+            let _ = told.send(Update::Upgrade(step));
+        })
+        .await;
+    });
 
     while let Some(request) = requests.recv().await {
         match request {

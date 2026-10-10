@@ -215,6 +215,22 @@ pub enum Update {
     SetupSaved(Result<(), String>),
     /// The sync status changed.
     Sync(Option<SyncView>),
+    /// How updating SkillPouch itself goes.
+    Upgrade(Upgrade),
+}
+
+/// SkillPouch updating itself while the dashboard is open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Upgrade {
+    Checking,
+    /// Installing this version.
+    Installing(String),
+    /// This version is installed; it runs after a restart.
+    Installed(String),
+    /// Nothing newer, or nothing worth trying now.
+    UpToDate,
+    /// Why it couldn't be installed.
+    Failed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

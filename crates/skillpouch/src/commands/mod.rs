@@ -81,11 +81,12 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
     }
 }
 
-/// Commands that update SkillPouch first when a newer release is out.
+/// Commands that update SkillPouch first when a newer release is out. The
+/// dashboard (no command) opens at once and updates behind it.
 fn updates(command: Option<&Command>) -> bool {
     !matches!(
         command,
-        Some(Command::Daemon { .. } | Command::Logout | Command::Unlink { .. })
+        None | Some(Command::Daemon { .. } | Command::Logout | Command::Unlink { .. })
     ) && !matches!(command, Some(Command::Status { json: true }))
 }
 
@@ -100,5 +101,19 @@ fn daemon_context(home: Option<std::path::PathBuf>, api_url: Option<String>) -> 
     match crate::daemon::server(&ctx.home) {
         Ok(url) if url != ctx.client.base() => Context::load_with(home, Some(url)),
         _ => Ok(ctx),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_dashboard_doesnt_wait_for_an_update_but_commands_do() {
+        assert!(!updates(None));
+        assert!(updates(Some(&Command::Sync)));
+        assert!(updates(Some(&Command::Status { json: false })));
+        assert!(!updates(Some(&Command::Status { json: true })));
+        assert!(!updates(Some(&Command::Logout)));
     }
 }

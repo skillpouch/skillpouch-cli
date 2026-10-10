@@ -1,20 +1,25 @@
 //! Keeping SkillPouch up to date on its own. Installed with npm, pnpm or
-//! bun, it asks the npm registry for the latest version at most every few
-//! hours and installs it with the same package manager: before a command
-//! someone runs at the terminal, and in the background sync. Builds from
-//! source and one-off `npx` runs are never touched.
+//! bun, it asks the npm registry for the latest version and installs it
+//! with the same package manager: before a command someone runs at the
+//! terminal (at most every few hours), in the background sync (hourly), and
+//! behind the dashboard each time it opens. Builds from source and one-off
+//! `npx` runs are never touched.
 
 use crate::context::{Context, VERSION};
 use crate::ui;
 use serde::{Deserialize, Serialize};
+use sp_tui::Upgrade;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::sync::OnceLock;
 
 pub const PACKAGE: &str = "skillpouch";
 const REGISTRY: &str = "https://registry.npmjs.org";
-/// How often the registry is asked.
-const CHECK_EVERY: u64 = 6 * 60 * 60;
+/// How often a command at the terminal asks the registry, so commands stay
+/// quick.
+const COMMAND_EVERY: u64 = 6 * 60 * 60;
+/// How often the background sync asks.
+const BACKGROUND_EVERY: u64 = 60 * 60;
 /// A version that failed to install is tried again after this long.
 const RETRY_AFTER: u64 = 24 * 60 * 60;
 /// Set on the command run again after an update, so it doesn't loop.
@@ -215,10 +220,34 @@ fn enabled(ctx: &Context) -> bool {
     !off && ctx.config.auto_update != Some(false)
 }
 
+/// Who looks for a new release, which decides how often the registry is asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asker {
+    Command,
+    Background,
+    /// The dashboard asks every time it opens: it doesn't wait for the answer.
+    Dashboard,
+}
+
+impl Asker {
+    fn every(self) -> u64 {
+        match self {
+            Self::Command => COMMAND_EVERY,
+            Self::Background => BACKGROUND_EVERY,
+            Self::Dashboard => 0,
+        }
+    }
+
+    /// The registry was last asked at `checked_at`: time to ask again.
+    fn due(self, checked_at: u64, now: u64) -> bool {
+        now.saturating_sub(checked_at) >= self.every()
+    }
+}
+
 /// The version to update to, if there is one worth trying now.
-async fn pending(ctx: &Context, now: u64) -> Option<String> {
+async fn pending(ctx: &Context, now: u64, asker: Asker) -> Option<String> {
     let mut state = State::load(ctx);
-    if now.saturating_sub(state.checked_at) >= CHECK_EVERY {
+    if asker.due(state.checked_at, now) {
         let registry = std::env::var("SKILLPOUCH_NPM_REGISTRY").unwrap_or_else(|_| REGISTRY.into());
         let asked = ctx.client.npm_latest(&registry, PACKAGE).await;
         state.checked_at = now;
@@ -250,7 +279,7 @@ pub async fn before_command(ctx: &Context) -> Option<ExitCode> {
     let exe = exe()?;
     let installer = installer(&exe)?;
     let now = crate::context::unix_now();
-    let latest = pending(ctx, now).await?;
+    let latest = pending(ctx, now, Asker::Command).await?;
     if cfg!(windows) {
         // Windows won't let a running program be replaced.
         ui::hint(format!(
@@ -262,10 +291,7 @@ pub async fn before_command(ctx: &Context) -> Option<ExitCode> {
     }
     let line = installer.manager.install_line();
     let spinner = ui::Spinner::start(format!("Updating SkillPouch {VERSION} → {latest}…"));
-    let version = latest.clone();
-    let result = tokio::task::spawn_blocking(move || installer.install(&version))
-        .await
-        .unwrap_or_else(|error| Err(error.to_string()));
+    let result = install(installer, &latest).await;
     spinner.clear();
     if let Err(error) = result {
         remember_failure(ctx, &latest, now);
@@ -274,14 +300,58 @@ pub async fn before_command(ctx: &Context) -> Option<ExitCode> {
         return None;
     }
     ui::success(format!("Updated to SkillPouch {latest}."));
+    Some(run_again())
+}
+
+/// Runs the same command again with the program now installed, and gives
+/// back its exit code.
+pub fn run_again() -> ExitCode {
+    let Some(exe) = exe() else {
+        return ExitCode::FAILURE;
+    };
     let status = Command::new(&exe)
         .args(std::env::args_os().skip(1))
         .env(UPDATED_ENV, "1")
         .status();
-    Some(match status {
+    match status {
         Ok(status) => ExitCode::from(u8::try_from(status.code().unwrap_or(1)).unwrap_or(1)),
         Err(_) => ExitCode::FAILURE,
-    })
+    }
+}
+
+async fn install(installer: Installer, version: &str) -> Result<(), String> {
+    let version = version.to_string();
+    tokio::task::spawn_blocking(move || installer.install(&version))
+        .await
+        .unwrap_or_else(|error| Err(error.to_string()))
+}
+
+/// Behind the dashboard, which opens without waiting: installs a newer
+/// release if there is one, telling the dashboard how it goes. It offers to
+/// restart once the new version is in. Silent when updating is off or this
+/// copy can't be updated.
+pub async fn in_dashboard(ctx: &Context, tell: impl Fn(Upgrade)) {
+    if !enabled(ctx) || std::env::var_os(UPDATED_ENV).is_some() {
+        return;
+    }
+    let Some(installer) = exe().as_deref().and_then(installer) else {
+        return;
+    };
+    tell(Upgrade::Checking);
+    let now = crate::context::unix_now();
+    let Some(latest) = pending(ctx, now, Asker::Dashboard).await else {
+        return tell(Upgrade::UpToDate);
+    };
+    tell(Upgrade::Installing(latest.clone()));
+    // On Windows the running program may be locked; then it says so and
+    // tries again another day.
+    match install(installer, &latest).await {
+        Ok(()) => tell(Upgrade::Installed(latest)),
+        Err(error) => {
+            remember_failure(ctx, &latest, now);
+            tell(Upgrade::Failed(error));
+        }
+    }
 }
 
 /// In the background sync: installs a newer release if there is one.
@@ -294,14 +364,10 @@ pub async fn in_background(ctx: &Context, log: &crate::daemon::Log) -> bool {
         return false;
     };
     let now = crate::context::unix_now();
-    let Some(latest) = pending(ctx, now).await else {
+    let Some(latest) = pending(ctx, now, Asker::Background).await else {
         return false;
     };
-    let version = latest.clone();
-    let result = tokio::task::spawn_blocking(move || installer.install(&version))
-        .await
-        .unwrap_or_else(|error| Err(error.to_string()));
-    match result {
+    match install(installer, &latest).await {
         Ok(()) => {
             log.line(&format!("updated to {latest}"));
             true
@@ -327,6 +393,21 @@ mod tests {
         assert!(!newer("0.1.0", "0.1.1"));
         assert!(!newer("0.2.0-beta.1", "0.1.1"));
         assert!(!newer("garbage", "0.1.1"));
+    }
+
+    #[test]
+    fn the_dashboard_asks_every_time_and_commands_every_six_hours() {
+        let checked = 1_000_000;
+        let hour = 60 * 60;
+        // Opening the dashboard asks the registry, however recently it was asked.
+        assert!(Asker::Dashboard.due(checked, checked));
+        // The background sync asks hourly.
+        assert_eq!(Asker::Background.every(), hour);
+        assert!(!Asker::Background.due(checked, checked + hour - 1));
+        assert!(Asker::Background.due(checked, checked + hour));
+        // Commands at the terminal stay quick: every six hours.
+        assert!(!Asker::Command.due(checked, checked + 5 * hour));
+        assert!(Asker::Command.due(checked, checked + 6 * hour));
     }
 
     #[test]

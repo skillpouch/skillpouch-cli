@@ -17,7 +17,7 @@ mod view;
 
 pub use model::{
     Account, ChoiceRow, ChoiceView, Computer, Dashboard, FirstSync, Launch, LoginStep, Notice,
-    Pouch, Request, SetupChoice, SyncTone, SyncView, Tone, Update,
+    Pouch, Request, SetupChoice, SyncTone, SyncView, Tone, Update, Upgrade,
 };
 
 use app::{App, Outcome, Status};
@@ -31,6 +31,14 @@ const FRAME: Duration = Duration::from_millis(80);
 /// The dashboard refreshes itself this often.
 const REFRESH_EVERY: Duration = Duration::from_secs(60);
 
+/// How the dashboard was closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Closed {
+    Quit,
+    /// To start again with the version just installed.
+    Restart,
+}
+
 /// Runs the dashboard until the user quits. `signed_in`: this computer has
 /// keys, so the first [`Update`] will be the dashboard (or why it failed).
 pub fn run(
@@ -38,7 +46,7 @@ pub fn run(
     signed_in: bool,
     mut send: impl FnMut(Request),
     updates: Receiver<Update>,
-) -> io::Result<()> {
+) -> io::Result<Closed> {
     let mut terminal = ratatui::init();
     let mut app = App::new(launch, signed_in);
     let mut refreshed = Instant::now();
@@ -89,7 +97,8 @@ pub fn run(
         match outcome {
             Outcome::Nothing => {}
             Outcome::Send(request) => send(request),
-            Outcome::Quit => break Ok(()),
+            Outcome::Quit => break Ok(Closed::Quit),
+            Outcome::Restart => break Ok(Closed::Restart),
         }
     };
     ratatui::restore();

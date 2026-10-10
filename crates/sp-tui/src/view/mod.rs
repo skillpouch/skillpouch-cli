@@ -27,6 +27,13 @@ const TAB_GAP_NARROW: usize = 2;
 
 pub fn draw(app: &App, frame: &mut Frame) {
     let area = frame.area();
+    draw_screen(app, frame, area);
+    if let Some(version) = &app.restart {
+        draw_restart(app, version, frame, area);
+    }
+}
+
+fn draw_screen(app: &App, frame: &mut Frame, area: Rect) {
     if let Some(login) = &app.login {
         login::draw(app, login, frame, area);
         draw_notice(app, frame, area);
@@ -147,10 +154,20 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
     draw_notice(app, frame, area);
 }
 
-/// The latest notice, right-aligned on the bottom row.
+/// The latest notice, right-aligned on the bottom row; without one, how
+/// updating SkillPouch goes.
 fn draw_notice(app: &App, frame: &mut Frame, area: Rect) {
-    let Some(notice) = app.notice() else {
-        return;
+    let line = match (app.notice(), app.upgrade_status()) {
+        (Some(notice), _) => Line::styled(
+            notice.text.as_str(),
+            match notice.tone {
+                Tone::Success => theme::success(),
+                Tone::Info => theme::muted(),
+                Tone::Error => theme::error(),
+            },
+        ),
+        (None, Some(status)) => Line::styled(status, theme::meta()),
+        (None, None) => return,
     };
     let row = Rect {
         y: area.bottom().saturating_sub(1),
@@ -158,24 +175,42 @@ fn draw_notice(app: &App, frame: &mut Frame, area: Rect) {
         ..area
     }
     .inner(Margin::new(2, 0));
-    let style = match notice.tone {
-        Tone::Success => theme::success(),
-        Tone::Info => theme::muted(),
-        Tone::Error => theme::error(),
-    };
+    let width = u16::try_from(line.width()).unwrap_or(u16::MAX);
     frame.render_widget(
         Clear,
         Rect {
-            x: row
-                .right()
-                .saturating_sub(u16::try_from(notice.text.len()).unwrap_or(0)),
-            width: u16::try_from(notice.text.len()).unwrap_or(0).min(row.width),
+            x: row.right().saturating_sub(width),
+            width: width.min(row.width),
             ..row
         },
     );
+    frame.render_widget(Paragraph::new(line).right_aligned(), row);
+}
+
+fn draw_restart(app: &App, version: &str, frame: &mut Frame, area: Rect) {
+    let rect = centered(area, 60, 8);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme::BORDER_STRONG))
+        .padding(Padding::new(2, 2, 1, 0));
+    let lines = vec![
+        Line::styled(
+            format!("SkillPouch updated to {version} — restart now?"),
+            theme::strong(),
+        ),
+        Line::styled(
+            format!("Later keeps {} running until you quit.", app.launch.version),
+            theme::meta(),
+        ),
+        Line::default(),
+        keys(&[("enter", "restart"), ("esc", "later")]),
+    ];
     frame.render_widget(
-        Paragraph::new(Line::styled(notice.text.as_str(), style)).right_aligned(),
-        row,
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
+        rect,
     );
 }
 
@@ -207,7 +242,7 @@ fn draw_logout(frame: &mut Frame, area: Rect) {
 pub(crate) mod tests {
     use super::*;
     use crate::app::tests::{launch, ready};
-    use crate::model::{LoginStep, Update};
+    use crate::model::{LoginStep, Update, Upgrade};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -402,6 +437,62 @@ pub(crate) mod tests {
         let app = ready();
         let text = screen(&app, 72, 30);
         assert!(text.contains("Account") && !text.contains("Ada Lovelace  ·"));
+    }
+
+    #[test]
+    fn the_footer_says_how_updating_goes() {
+        let mut app = ready();
+        let quiet = screen(&app, 110, 34);
+        assert!(!quiet.contains("update"), "{quiet}");
+        app.apply(Update::Upgrade(Upgrade::Checking));
+        let checking = screen(&app, 110, 34);
+        let footer = checking.lines().last().unwrap_or_default();
+        assert!(
+            footer.contains("q quit") && footer.contains("Checking for updates…"),
+            "{checking}"
+        );
+        app.apply(Update::Upgrade(Upgrade::Installing("0.2.3".into())));
+        let installing = screen(&app, 110, 34);
+        let footer = installing.lines().last().unwrap_or_default();
+        assert!(
+            footer.contains("Updating SkillPouch to 0.2.3…"),
+            "{installing}"
+        );
+        app.apply(Update::Upgrade(Upgrade::Failed(
+            "EBUSY: resource busy".into(),
+        )));
+        let failed = screen(&app, 110, 34);
+        let footer = failed.lines().last().unwrap_or_default();
+        assert!(
+            footer.contains("Couldn't update: EBUSY: resource busy")
+                && !footer.contains("Updating"),
+            "{failed}"
+        );
+        // Also behind the login screen.
+        let mut signed_out = App::new(launch(), false);
+        signed_out.apply(Update::Upgrade(Upgrade::Checking));
+        assert!(screen(&signed_out, 100, 32).contains("Checking for updates…"));
+    }
+
+    #[test]
+    fn a_finished_update_asks_to_restart() {
+        let mut app = ready();
+        app.apply(Update::Upgrade(Upgrade::Installing("0.2.3".into())));
+        app.apply(Update::Upgrade(Upgrade::Installed("0.2.3".into())));
+        let text = screen(&app, 110, 34);
+        contains_all(
+            &text,
+            &[
+                "SkillPouch updated to 0.2.3 — restart now?",
+                "Later keeps v0.1.0 running until you quit.",
+                "enter restart",
+                "esc later",
+                "Hi, Ada",
+            ],
+        );
+        assert!(!text.contains("Updating SkillPouch"), "{text}");
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!screen(&app, 110, 34).contains("restart now?"));
     }
 
     #[test]

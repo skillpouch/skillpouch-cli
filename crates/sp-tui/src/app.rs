@@ -3,13 +3,15 @@
 //! Three screens: the login screen while this computer isn't connected (or
 //! is logging in again), setup right after it connects, and the dashboard.
 
-use crate::model::{Dashboard, Launch, LoginStep, Notice, Request, Update};
+use crate::model::{Dashboard, Launch, LoginStep, Notice, Request, Update, Upgrade};
 use crate::setup::{self, Setup};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::time::{Duration, Instant};
 
 /// How long a notice stays in the footer.
 const NOTICE_FOR: Duration = Duration::from_secs(5);
+/// Why an update failed is cut to this many characters in the footer.
+const REASON_MAX: usize = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -104,6 +106,8 @@ pub enum Outcome {
     Nothing,
     Send(Request),
     Quit,
+    /// Quit and start again with the version just installed.
+    Restart,
 }
 
 pub struct App {
@@ -120,6 +124,10 @@ pub struct App {
     /// Asking before logging out.
     pub confirm_logout: bool,
     notice: Option<(Notice, Instant)>,
+    /// Looking for or installing a new SkillPouch, shown in the footer.
+    upgrade: Option<Upgrade>,
+    /// This version was just installed: asking whether to restart.
+    pub restart: Option<String>,
     pub tick: usize,
 }
 
@@ -139,6 +147,8 @@ impl App {
             setup: None,
             confirm_logout: false,
             notice: None,
+            upgrade: None,
+            restart: None,
             tick: 0,
         }
     }
@@ -167,6 +177,31 @@ impl App {
 
     pub fn notice(&self) -> Option<&Notice> {
         self.notice.as_ref().map(|(notice, _)| notice)
+    }
+
+    /// What the footer says while SkillPouch updates itself.
+    pub fn upgrade_status(&self) -> Option<String> {
+        match self.upgrade.as_ref()? {
+            Upgrade::Checking => Some("Checking for updates…".into()),
+            Upgrade::Installing(version) => Some(format!("Updating SkillPouch to {version}…")),
+            _ => None,
+        }
+    }
+
+    fn upgrade(&mut self, step: Upgrade) {
+        self.upgrade = None;
+        match step {
+            Upgrade::Checking | Upgrade::Installing(_) => self.upgrade = Some(step),
+            Upgrade::Installed(version) => self.restart = Some(version),
+            Upgrade::UpToDate => {}
+            Upgrade::Failed(reason) => {
+                let mut short: String = reason.chars().take(REASON_MAX).collect();
+                if short.len() < reason.len() {
+                    short.push('…');
+                }
+                self.show(Notice::error(format!("Couldn't update: {short}")));
+            }
+        }
     }
 
     pub fn cursor(&self, tab: Tab) -> usize {
@@ -228,6 +263,7 @@ impl App {
                     dashboard.sync = sync;
                 }
             }
+            Update::Upgrade(step) => self.upgrade(step),
             Update::Login(step) => self.login_step(step),
             Update::Notice(notice) => self.show(notice),
             Update::Setup(assistants) => {
@@ -320,6 +356,9 @@ impl App {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Outcome::Quit;
         }
+        if self.restart.is_some() {
+            return self.on_restart_key(key.code);
+        }
         if let Some(login) = self.login.clone() {
             return self.on_login_key(key.code, login.step.as_ref());
         }
@@ -376,6 +415,18 @@ impl App {
                 ));
                 Outcome::Nothing
             }
+        }
+    }
+
+    /// Restart with the new version, or later: this one keeps running.
+    fn on_restart_key(&mut self, code: KeyCode) -> Outcome {
+        match code {
+            KeyCode::Enter => Outcome::Restart,
+            KeyCode::Esc => {
+                self.restart = None;
+                Outcome::Nothing
+            }
+            _ => Outcome::Nothing,
         }
     }
 
@@ -916,6 +967,67 @@ pub(crate) mod tests {
         assert_eq!(
             app.notice().map(|n| n.text.as_str()),
             Some("Server unreachable.")
+        );
+    }
+
+    #[test]
+    fn updating_shows_in_the_footer_then_asks_to_restart() {
+        let mut app = ready();
+        assert_eq!(app.upgrade_status(), None);
+        app.apply(Update::Upgrade(Upgrade::Checking));
+        assert_eq!(
+            app.upgrade_status().as_deref(),
+            Some("Checking for updates…")
+        );
+        app.apply(Update::Upgrade(Upgrade::Installing("0.2.3".into())));
+        assert_eq!(
+            app.upgrade_status().as_deref(),
+            Some("Updating SkillPouch to 0.2.3…")
+        );
+        assert_eq!(app.restart, None);
+        app.apply(Update::Upgrade(Upgrade::Installed("0.2.3".into())));
+        assert_eq!(app.upgrade_status(), None);
+        assert_eq!(app.restart.as_deref(), Some("0.2.3"));
+        // The question takes the keys until it is answered.
+        assert_eq!(press(&mut app, KeyCode::Char('3')), Outcome::Nothing);
+        assert_eq!(app.tab, Tab::Overview);
+        assert_eq!(press(&mut app, KeyCode::Enter), Outcome::Restart);
+    }
+
+    #[test]
+    fn later_keeps_this_version_running() {
+        let mut app = ready();
+        app.apply(Update::Upgrade(Upgrade::Installed("0.2.3".into())));
+        assert_eq!(press(&mut app, KeyCode::Esc), Outcome::Nothing);
+        assert_eq!(app.restart, None);
+        // Back on the dashboard: esc quits again.
+        assert_eq!(press(&mut app, KeyCode::Esc), Outcome::Quit);
+    }
+
+    #[test]
+    fn up_to_date_says_nothing_and_a_failure_says_why_briefly() {
+        let mut app = ready();
+        app.apply(Update::Upgrade(Upgrade::Checking));
+        app.apply(Update::Upgrade(Upgrade::UpToDate));
+        assert_eq!(app.upgrade_status(), None);
+        assert_eq!(app.notice(), None);
+
+        app.apply(Update::Upgrade(Upgrade::Installing("0.2.3".into())));
+        app.apply(Update::Upgrade(Upgrade::Failed(format!(
+            "npm error code EBUSY: resource busy or locked {}",
+            "x".repeat(80)
+        ))));
+        assert_eq!(app.upgrade_status(), None);
+        assert_eq!(app.restart, None);
+        let notice = app.notice().cloned();
+        assert!(
+            notice
+                .as_ref()
+                .is_some_and(|n| n.tone == crate::model::Tone::Error
+                    && n.text.starts_with("Couldn't update: npm error code EBUSY")
+                    && n.text.ends_with('…')
+                    && n.text.chars().count() == "Couldn't update: ".len() + REASON_MAX + 1),
+            "{notice:?}"
         );
     }
 

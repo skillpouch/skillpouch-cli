@@ -34,8 +34,8 @@ const SETTLE: Duration = Duration::from_millis(500);
 /// A full sync at least this often, whatever happens.
 const FULL_SYNC: Duration = Duration::from_secs(5 * 60);
 /// How often the background sync looks for a new SkillPouch release (the
-/// registry itself is asked less often; see `update`).
-const UPDATE_CHECK: Duration = Duration::from_secs(30 * 60);
+/// registry itself is asked hourly; see `update`).
+const UPDATE_CHECK: Duration = Duration::from_secs(10 * 60);
 /// How often token usage is counted and sent, so the website stays current
 /// without the TUI open.
 const USAGE_EVERY: Duration = Duration::from_secs(10 * 60);
