@@ -98,7 +98,8 @@ impl ScanCache {
         let Ok(bytes) = serde_json::to_vec(self) else {
             return;
         };
-        let staged = path.with_extension("tmp");
+        // Per process: the background sync and the TUI may scan at once.
+        let staged = path.with_extension(format!("{}.tmp", std::process::id()));
         if std::fs::write(&staged, bytes).is_ok() {
             let _ = std::fs::rename(&staged, path);
         }

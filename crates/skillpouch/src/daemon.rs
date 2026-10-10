@@ -2,7 +2,8 @@
 //! syncs again. Remote changes arrive through a long-poll on the pouch's
 //! events; local ones are found by checking the pouch folder and the
 //! assistants' folders every couple of seconds. A full sync also runs every
-//! few minutes as a safety net.
+//! few minutes as a safety net. Every ten minutes it also counts the
+//! assistants' token usage and sends what changed.
 //!
 //! One runs per `~/.skillpouch` (a lock file sees to that), started as a
 //! user service (systemd on Linux, launchd on macOS) or, where there is
@@ -33,6 +34,9 @@ const FULL_SYNC: Duration = Duration::from_secs(5 * 60);
 /// How often the background sync looks for a new SkillPouch release (the
 /// registry itself is asked less often; see `update`).
 const UPDATE_CHECK: Duration = Duration::from_secs(30 * 60);
+/// How often token usage is counted and sent, so the website stays current
+/// without the TUI open.
+const USAGE_EVERY: Duration = Duration::from_secs(10 * 60);
 /// The log is started over past this size.
 const LOG_MAX: u64 = 1024 * 1024;
 
@@ -177,6 +181,8 @@ pub async fn run(ctx: &Context) -> Result<()> {
 
     let mut failures: u32 = 0;
     let mut update_due = std::time::Instant::now();
+    let mut usage_due = std::time::Instant::now();
+    let reported = crate::usage::Reported::default();
     loop {
         if std::time::Instant::now() >= update_due {
             update_due = std::time::Instant::now() + UPDATE_CHECK;
@@ -199,6 +205,12 @@ pub async fn run(ctx: &Context) -> Result<()> {
                     failures = 0;
                     if report.sent + report.received + report.conflicts > 0 || report.first {
                         log.line(&describe_report(&report));
+                    }
+                    if std::time::Instant::now() >= usage_due {
+                        usage_due = std::time::Instant::now() + USAGE_EVERY;
+                        if let Err(problem) = crate::usage::report(ctx, &session, &reported).await {
+                            log.line(&format!("token usage: {problem}"));
+                        }
                     }
                     waiting_on = Some((session, report));
                     Duration::ZERO

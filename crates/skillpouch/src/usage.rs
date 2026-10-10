@@ -53,6 +53,17 @@ fn key(row: &UsageRow) -> RowKey {
 
 /// Sends this computer's new usage and returns the account's.
 pub async fn sync(ctx: &Context, session: &Session, reported: &Reported) -> Result<Usage, String> {
+    report(ctx, session, reported).await?;
+    let summary = ctx
+        .client
+        .usage(&session.key, &session.credentials.access_token)
+        .await
+        .map_err(|error| format!("Couldn't load token usage: {error}."))?;
+    Ok(usage(summary, OffsetDateTime::now_utc().date()))
+}
+
+/// Counts this computer's logs and sends what changed since the last report.
+pub async fn report(ctx: &Context, session: &Session, reported: &Reported) -> Result<(), String> {
     let cache = ctx.home.state_dir().join("usage-scan.json");
     let _ = ctx.home.ensure_private_dir(&ctx.home.state_dir());
     let scanned = tokio::task::spawn_blocking(move || scan(cache))
@@ -72,12 +83,7 @@ pub async fn sync(ctx: &Context, session: &Session, reported: &Reported) -> Resu
             reported.remember(chunk);
         }
     }
-    let summary = ctx
-        .client
-        .usage(&session.key, &session.credentials.access_token)
-        .await
-        .map_err(|error| format!("Couldn't load token usage: {error}."))?;
-    Ok(usage(summary, OffsetDateTime::now_utc().date()))
+    Ok(())
 }
 
 /// This computer's source id and its usage rows.

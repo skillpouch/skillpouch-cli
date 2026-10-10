@@ -11,7 +11,7 @@ The `skillpouch` command-line tool and background sync daemon.
 | `crates/sp-harness/` | The AI assistants on this computer (Claude Code, Codex, OpenCode, Gemini CLI, Copilot CLI, Cursor, Windsurf, Qwen Code, Factory Droid, Crush): what they hold and where they read it. |
 | `crates/sp-sync/` | The sync engine: the pouch as plain files in `~/.skillpouch/pouches/<id>/`, three-way compare with the server, encrypted commits, links into each assistant, and MCP servers, hooks and plugins in their configs. |
 | `crates/sp-tui/` | The terminal UI (ratatui): overview with the animated mascot, pouches (pick the one this computer syncs), token usage, computers, account. |
-| `crates/sp-usage/` | Token counts per day and model from Claude Code, Codex and OpenCode logs. Only counts leave the computer. |
+| `crates/sp-usage/` | Token counts per day and model from Claude Code, Codex and OpenCode logs, sent by the background sync every ten minutes. Only counts leave the computer. |
 | `npm/skillpouch/` | The npm package `skillpouch` (`npm i -g skillpouch`): a launcher that runs the native binary from `@skillpouch/cli-<os>-<cpu>`. |
 | `scripts/` | `release.mjs` (the steps semantic-release runs: verify, stamp, publish) and `npm-packages.mjs` (the platform packages of a release), with tests (`npm test`). |
 
