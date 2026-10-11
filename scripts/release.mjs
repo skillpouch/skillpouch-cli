@@ -4,7 +4,8 @@
 // build jobs:
 //
 //   node scripts/release.mjs verify <version>   check the version, note it in .release-version
-//   node scripts/release.mjs stamp <version>    write it into Cargo.toml, Cargo.lock and npm/skillpouch
+//   node scripts/release.mjs stamp <version>    write it into Cargo.toml, Cargo.lock and npm/skillpouch,
+//                                               with README.md as the npm package's README
 //   node scripts/release.mjs publish <version>  publish the platform packages built from $BINARIES
 //
 // The version is planned once (a dry run), the binaries are built with it, and
@@ -67,6 +68,26 @@ export function stampPackageJson(text, version) {
 	return `${JSON.stringify(stamped, null, '\t')}\n`;
 }
 
+const REPOSITORY = 'skillpouch/skillpouch-cli';
+const IMAGE = /\.(png|jpe?g|gif|webp|svg)$/i;
+
+/**
+ * The repository README for the npm page: npm doesn't know where relative
+ * links point, so they go to this release's tag on GitHub.
+ */
+export function npmReadme(text, version) {
+	const absolute = (link) => {
+		if (/^([a-z][a-z0-9+.-]*:|#|\/\/)/i.test(link)) return link;
+		const path = link.replace(/^\.?\//, '');
+		return IMAGE.test(path.split(/[?#]/)[0])
+			? `https://raw.githubusercontent.com/${REPOSITORY}/v${version}/${path}`
+			: `https://github.com/${REPOSITORY}/blob/v${version}/${path}`;
+	};
+	return text
+		.replace(/\b(src|href)="([^"]+)"/g, (_, attribute, link) => `${attribute}="${absolute(link)}"`)
+		.replace(/(\]\()([^)\s]+)/g, (_, open, link) => `${open}${absolute(link)}`);
+}
+
 function rewrite(path, change) {
 	const file = join(root, path);
 	writeFileSync(file, change(readFileSync(file, 'utf8')));
@@ -76,6 +97,10 @@ function stamp(version) {
 	rewrite('Cargo.toml', (text) => stampCargoToml(text, version));
 	rewrite('Cargo.lock', (text) => stampCargoLock(text, version));
 	rewrite('npm/skillpouch/package.json', (text) => stampPackageJson(text, version));
+	writeFileSync(
+		join(root, 'npm/skillpouch/README.md'),
+		npmReadme(readFileSync(join(root, 'README.md'), 'utf8'), version),
+	);
 }
 
 function published(name, version) {
