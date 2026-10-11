@@ -20,6 +20,7 @@ pub mod plugins;
 pub mod project;
 pub mod release;
 pub mod remote;
+pub mod settings;
 pub mod state;
 pub mod status;
 pub mod translate;

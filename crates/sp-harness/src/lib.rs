@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 /// Every kind a pouch holds, as the pouch names them and as people read
 /// them; a computer can turn each off.
-pub const POUCH_KINDS: [(&str, &str); 7] = [
+pub const POUCH_KINDS: [(&str, &str); 8] = [
     ("instructions", "Instructions"),
     ("skill", "Skills"),
     ("agent", "Agents"),
@@ -31,7 +31,307 @@ pub const POUCH_KINDS: [(&str, &str); 7] = [
     ("mcp_server", "MCP servers"),
     ("hook", "Hooks"),
     ("plugin", "Plugins"),
+    ("setting", "Settings"),
 ];
+
+/// User preferences only; integrations (MCP, hooks, plugins and files) have
+/// separate item kinds. Paths are relative to the assistant's root.
+pub struct SettingsFile {
+    pub file: &'static str,
+    pub keys: &'static [&'static str],
+    pub maps: &'static [&'static str],
+}
+
+pub fn settings(id: &str) -> &'static [SettingsFile] {
+    match id {
+        "opencode" => &[
+            SettingsFile {
+                file: "opencode.json",
+                keys: &[
+                    "providers",
+                    "model",
+                    "default_agent",
+                    "agents",
+                    "permissions",
+                    "share",
+                    "username",
+                    "compaction",
+                    "tool_output",
+                    "websearch",
+                    "experimental",
+                ],
+                maps: &["providers", "agents"],
+            },
+            // OpenCode 2 keeps its terminal preferences in `cli.json` (it
+            // migrates OpenCode 1's `tui.json` once, then ignores it).
+            SettingsFile {
+                file: "cli.json",
+                keys: &[
+                    "theme",
+                    "keybinds",
+                    "leader",
+                    "scroll",
+                    "diffs",
+                    "prompt",
+                    "mouse",
+                    "cursor",
+                    "animations",
+                    "attention",
+                    "session",
+                    "terminal",
+                    "tabs",
+                ],
+                maps: &[],
+            },
+        ],
+        "claude-code" => &[SettingsFile {
+            file: "settings.json",
+            keys: &[
+                "env",
+                "model",
+                "modelOverrides",
+                "fallbackModel",
+                "advisorModel",
+                "effortLevel",
+                "alwaysThinkingEnabled",
+                "fastMode",
+                "permissions",
+                "apiKeyHelper",
+                "statusLine",
+                "outputStyle",
+                "language",
+                "theme",
+                "tui",
+                "viewMode",
+                "editorMode",
+                "verbose",
+                "spinnerTipsEnabled",
+                "autoCompactEnabled",
+                "showThinkingSummaries",
+                "showTurnDuration",
+                "prefersReducedMotion",
+                "syntaxHighlightingDisabled",
+                "terminalProgressBarEnabled",
+                "includeCoAuthoredBy",
+                "attribution",
+                "autoUpdatesChannel",
+                "cleanupPeriodDays",
+                "respectGitignore",
+            ],
+            maps: &["env"],
+        }],
+        "codex" => &[SettingsFile {
+            file: "config.toml",
+            keys: &[
+                "model",
+                "model_provider",
+                "model_providers",
+                "profiles",
+                "approval_policy",
+                "sandbox_mode",
+                "model_reasoning_effort",
+                "model_reasoning_summary",
+                "model_verbosity",
+                "openai_base_url",
+                "tui",
+                "features",
+                "web_search",
+            ],
+            maps: &["model_providers", "profiles"],
+        }],
+        "gemini-cli" => &[
+            SettingsFile {
+                file: "settings.json",
+                keys: &[
+                    "general",
+                    "ui",
+                    "model",
+                    "tools",
+                    "privacy",
+                    "security.auth.selectedType",
+                ],
+                maps: &[],
+            },
+            SettingsFile {
+                file: ".env",
+                keys: &[],
+                maps: &[],
+            },
+        ],
+        "qwen-code" => &[SettingsFile {
+            file: "settings.json",
+            keys: &[
+                "modelProviders",
+                "providerProtocol",
+                "env",
+                "security.auth",
+                "model",
+                "general",
+                "ui",
+                "tools",
+                "proxy",
+            ],
+            maps: &["modelProviders", "env"],
+        }],
+        // Not `trustedFolders`, `hooks`, `disableAllHooks`, the proxy or the
+        // IDE: those belong to one computer or to the Hooks kind.
+        "copilot" => &[SettingsFile {
+            file: "settings.json",
+            keys: &[
+                "model",
+                "contextTier",
+                "autoTier",
+                "theme",
+                "mouse",
+                "renderMarkdown",
+                "inlineImages",
+                "scrollbar",
+                "screenReader",
+                "showTipsOnStartup",
+                "stream",
+                "streamerMode",
+                "banner",
+                "bannerStyle",
+                "beep",
+                "beepOnSchedule",
+                "notifications",
+                "terminalNotifications",
+                "compactPaste",
+                "copyOnSelect",
+                "commandHistoryMaxSize",
+                "allowedUrls",
+                "deniedUrls",
+                "includeCoAuthoredBy",
+                "defaultMode",
+                "defaultPermissionMode",
+                "continueOnAutoMode",
+                "stayInAutopilot",
+                "respectGitignore",
+                "tabs",
+                "terminalProgress",
+                "updateTerminalTitle",
+                "footer",
+                "statusLine",
+                "autoUpdate",
+                "experimental",
+                "memory",
+            ],
+            maps: &[],
+        }],
+        "crush" => &[SettingsFile {
+            file: "crush.json",
+            keys: &["providers", "models", "options", "permissions", "tools"],
+            maps: &["providers"],
+        }],
+        "factory" => &[SettingsFile {
+            file: "settings.json",
+            keys: &[
+                "model",
+                "reasoningEffort",
+                "customModels",
+                "sessionDefaultSettings",
+            ],
+            maps: &[],
+        }],
+        _ => &[],
+    }
+}
+
+/// OpenCode 1's files: its config's own key names, and the terminal
+/// preferences in `tui.json` (1.x ignores `theme` and `keybinds` in
+/// `opencode.json`).
+pub const OPENCODE_V1_SETTINGS: [SettingsFile; 2] = [
+    SettingsFile {
+        file: "opencode.json",
+        keys: &[
+            "provider",
+            "model",
+            "small_model",
+            "default_agent",
+            "agent",
+            "permission",
+            "tools",
+            "share",
+            "username",
+            "autoupdate",
+            "disabled_providers",
+            "enabled_providers",
+            "compaction",
+            "tool_output",
+            "experimental",
+        ],
+        maps: &["provider", "agent"],
+    },
+    SettingsFile {
+        file: "tui.json",
+        keys: &[
+            "theme",
+            "keybinds",
+            "leader_timeout",
+            "scroll_speed",
+            "scroll_acceleration",
+            "diff_style",
+            "mouse",
+            "cursor",
+            "prompt",
+            "attention",
+        ],
+        maps: &[],
+    },
+];
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    #[test]
+    fn settings_are_only_the_eight_global_assistants() {
+        for id in [
+            "opencode",
+            "claude-code",
+            "codex",
+            "gemini-cli",
+            "qwen-code",
+            "copilot",
+            "crush",
+            "factory",
+        ] {
+            assert!(!settings(id).is_empty(), "{id}");
+        }
+        for id in ["cursor", "windsurf", "antigravity"] {
+            assert!(settings(id).is_empty(), "{id}");
+        }
+        assert!(
+            settings("gemini-cli")
+                .iter()
+                .any(|spec| spec.file == ".env")
+        );
+        assert_eq!(settings("codex")[0].maps, ["model_providers", "profiles"]);
+        let files = |specs: &[SettingsFile]| specs.iter().map(|s| s.file).collect::<Vec<_>>();
+        assert_eq!(files(settings("opencode")), ["opencode.json", "cli.json"]);
+        assert_eq!(files(&OPENCODE_V1_SETTINGS), ["opencode.json", "tui.json"]);
+        for private in [
+            "trustedFolders",
+            "hooks",
+            "disableAllHooks",
+            "proxyUrl",
+            "ide",
+        ] {
+            assert!(!settings("copilot")[0].keys.contains(&private), "{private}");
+        }
+        assert!(settings("claude-code")[0].keys.contains(&"theme"));
+        assert!(!settings("crush")[0].keys.contains(&"env"));
+        assert_eq!(
+            settings("factory")[0].keys,
+            [
+                "model",
+                "reasoningEffort",
+                "customModels",
+                "sessionDefaultSettings"
+            ]
+        );
+    }
+}
 
 /// What an item is, in the order the setup screen lists them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

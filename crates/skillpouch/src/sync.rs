@@ -417,6 +417,28 @@ async fn run_with(ctx: &Context, session: &mut Session, mut record: SetupRecord)
         .collect();
     bring_in_hooks_and_plugins(&dir, &config_targets, &mut projection, &claude_plugins)?;
 
+    let mut settings_state = sp_sync::settings::DeviceState::load(&ctx.home, &record.pouch_id)?;
+    // Uninstalled assistants lose their per-device preferences history, but
+    // an explicit `select --off` remains in the user's config.toml.
+    let installed: std::collections::BTreeSet<_> = sp_harness::targets(&places)
+        .into_iter()
+        .map(|target| target.id.to_string())
+        .collect();
+    settings_state
+        .harnesses
+        .retain(|id, _| installed.contains(id));
+    if choice.kind_on("setting") {
+        sp_sync::settings::capture(&dir, &targets, &mut settings_state)?;
+        settings_state.save(&ctx.home, &record.pouch_id)?;
+    }
+
+    let previously_present: std::collections::BTreeSet<_> = dir
+        .read()?
+        .0
+        .keys()
+        .filter(|key| key.starts_with("setting/"))
+        .cloned()
+        .collect();
     let mut state = PouchState::load(&ctx.home, &record.pouch_id)?;
     if state.epoch != remote.pouch.epoch && !state.epoch.is_empty() {
         // The pouch's history was rewritten: compare everything afresh.
@@ -466,6 +488,22 @@ async fn run_with(ctx: &Context, session: &mut Session, mut record: SetupRecord)
     }
 
     let (mut items, _) = dir.read()?;
+    if choice.kind_on("setting") {
+        for target in &targets {
+            let key = format!("setting/{}", target.id);
+            if !items.contains_key(&key) && previously_present.contains(&key) {
+                settings_state.deleted.insert(target.id.into());
+            }
+        }
+        report.backed_up.extend(sp_sync::settings::project(
+            &dir,
+            &items,
+            &targets,
+            &mut settings_state,
+            &backups,
+        )?);
+        settings_state.save(&ctx.home, &record.pouch_id)?;
+    }
     items.retain(|_, item| choice.kind_on(&item.kind));
     let (next, projected) = project::project(&ctx.home, &items, &targets, &backups, &projection)?;
     projection.links = next.links;

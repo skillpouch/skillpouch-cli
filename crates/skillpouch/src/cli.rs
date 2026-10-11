@@ -51,6 +51,11 @@ pub enum Command {
     },
     /// Sync this computer's pouch now.
     Sync,
+    /// List or control the preferences synced for each assistant.
+    Settings {
+        #[command(subcommand)]
+        action: SettingsAction,
+    },
     /// Open the web app to pick versions of items changed in two places.
     Conflicts,
     /// Choose what this computer syncs: assistants and kinds, on or off.
@@ -74,6 +79,32 @@ pub enum Command {
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SettingsAction {
+    /// List entries and their status, optionally for one assistant.
+    List {
+        /// Only this assistant (`claude-code`, `opencode`, …).
+        #[arg(value_name = "ASSISTANT")]
+        harness: Option<String>,
+    },
+    /// Stop syncing an entry on this computer (the pouch keeps it).
+    Exclude {
+        /// The assistant (`claude-code`, `opencode`, …).
+        #[arg(value_name = "ASSISTANT")]
+        harness: String,
+        /// The entry, as `settings list` shows it (`settings.json:env.API_URL`).
+        entry: String,
+    },
+    /// Restore an excluded entry from the pouch now.
+    Include {
+        /// The assistant (`claude-code`, `opencode`, …).
+        #[arg(value_name = "ASSISTANT")]
+        harness: String,
+        /// The entry, as `settings list` shows it (`settings.json:env.API_URL`).
+        entry: String,
     },
 }
 
