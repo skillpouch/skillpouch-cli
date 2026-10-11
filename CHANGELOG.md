@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.4.0](https://github.com/skillpouch/skillpouch-cli/compare/v0.3.0...v0.4.0) (2026-10-11)
+
+### Features
+
+* **harness:** antigravity support ([b85a37a](https://github.com/skillpouch/skillpouch-cli/commit/b85a37adc7973de791f49eea04af5ed4cc65063f))
+
+### Bug fixes
+
+* **crypto:** read a revision whose parent link the server pruned ([c240691](https://github.com/skillpouch/skillpouch-cli/commit/c24069164263fab4f4f49eaf8419935c1c3f9497))
+* **sync:** checkpoint verified revision progress safely ([3186326](https://github.com/skillpouch/skillpouch-cli/commit/31863265988ddd8b727c4eaca3e4b6795cc0b3da))
+* **sync:** follow missed edits through signed history; hold only items that can't be verified ([59eea0a](https://github.com/skillpouch/skillpouch-cli/commit/59eea0ac90d3fad5ea996140d6da9b787244f55b))
+* **sync:** only a signed delete removes an item; refuse older versions of an item ([860a735](https://github.com/skillpouch/skillpouch-cli/commit/860a735f8ccb97ccfae76537a88c91c4d2d7a63e))
+* **sync:** refuse a server that tampers with items, pouch keys or the roster ([8272954](https://github.com/skillpouch/skillpouch-cli/commit/8272954bfdad5f5bd740b71d1a56669c819d0fd1))
+* **sync:** require signed tombstones and preserve reupload identity ([4628fa1](https://github.com/skillpouch/skillpouch-cli/commit/4628fa1a3a4adfa7a5a346304703192904e61913))
+
 ## [0.3.0](https://github.com/skillpouch/skillpouch-cli/compare/v0.2.2...v0.3.0) (2026-10-10)
 
 ### Features
