@@ -6,3 +6,5 @@ target/
 .release-version
 binaries/
 release-assets/
+# written from README.md at release (scripts/release.mjs stamp)
+npm/skillpouch/README.md

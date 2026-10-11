@@ -2,10 +2,17 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { PLATFORMS, build } from './npm-packages.mjs';
-import { checkVersion, stampCargoLock, stampCargoToml, stampPackageJson } from './release.mjs';
+import {
+	checkVersion,
+	npmReadme,
+	stampCargoLock,
+	stampCargoToml,
+	stampPackageJson,
+} from './release.mjs';
 
 test('only the workspace version in Cargo.toml changes', () => {
 	const text = [
@@ -116,4 +123,33 @@ test('Windows line endings are stamped too', () => {
 	const stamped = stampCargoLock(lock, '2.0.0');
 	assert.match(stamped, /name = "serde"\r\nversion = "1.0.0"\r\n/);
 	assert.match(stamped, /name = "skillpouch"\r\nversion = "2.0.0"\r\n/);
+});
+
+test('the npm README links to the release on GitHub', () => {
+	const text = [
+		'<img src=".github/assets/banner.png" alt="" />',
+		'<a href="https://skillpouch.net">Website</a> · <a href="#install">Install</a>',
+		'![Dashboard](.github/assets/tui-overview.webp)',
+		'See [`sp-harness`](crates/sp-harness) and [the licence](./LICENSE).',
+	].join('\n');
+	const readme = npmReadme(text, '1.2.3');
+	const raw = 'https://raw.githubusercontent.com/skillpouch/skillpouch-cli/v1.2.3';
+	const blob = 'https://github.com/skillpouch/skillpouch-cli/blob/v1.2.3';
+	assert.match(readme, new RegExp(`src="${raw}/.github/assets/banner.png"`));
+	assert.match(readme, new RegExp(`\\(${raw}/.github/assets/tui-overview.webp\\)`));
+	assert.match(readme, new RegExp(`\\(${blob}/crates/sp-harness\\)`));
+	assert.match(readme, new RegExp(`\\(${blob}/LICENSE\\)`));
+	assert.match(readme, /href="https:\/\/skillpouch.net"/);
+	assert.match(readme, /href="#install"/);
+});
+
+test('every link in the real README works from npm', () => {
+	const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+	const readme = npmReadme(readFileSync(join(root, 'README.md'), 'utf8'), '1.2.3');
+	const links = [
+		...readme.matchAll(/\b(?:src|href)="([^"]+)"/g),
+		...readme.matchAll(/\]\(([^)\s]+)/g),
+	].map(([, link]) => link);
+	assert.ok(links.length > 10);
+	for (const link of links) assert.match(link, /^(https:\/\/|#)/, link);
 });
