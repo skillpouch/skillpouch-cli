@@ -57,6 +57,30 @@ impl Manager {
         }
     }
 
+    /// The files the package manager can be, most likely first. On Windows
+    /// npm is `npm.cmd`, which isn't found under its bare name, and the
+    /// extensionless `npm` next to it is a shell script Windows can't run.
+    fn files(self, windows: bool) -> &'static [&'static str] {
+        match (self, windows) {
+            (Self::Npm, true) => &["npm.cmd", "npm.exe"],
+            (Self::Pnpm, true) => &["pnpm.exe", "pnpm.cmd"],
+            (Self::Bun, true) => &["bun.exe", "bun.cmd"],
+            (Self::Npm, false) => &["npm"],
+            (Self::Pnpm, false) => &["pnpm"],
+            (Self::Bun, false) => &["bun"],
+        }
+    }
+
+    /// The package manager in the first of `dirs` that has it.
+    fn find(self, windows: bool, dirs: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+        dirs.into_iter().find_map(|dir| {
+            self.files(windows)
+                .iter()
+                .map(|file| dir.join(file))
+                .find(|path| path.is_file())
+        })
+    }
+
     /// What someone types to install SkillPouch this way.
     pub fn install_line(self) -> String {
         match self {
@@ -117,13 +141,16 @@ pub fn installer(exe: &Path) -> Option<Installer> {
 
 impl Installer {
     fn command(&self, version: &str) -> Command {
-        let program = self.manager.program();
-        let found = self
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let dirs = self
             .bin_dir
-            .as_ref()
-            .map(|dir| dir.join(program))
-            .filter(|path| path.exists());
-        let mut command = Command::new(found.unwrap_or_else(|| PathBuf::from(program)));
+            .iter()
+            .cloned()
+            .chain(std::env::split_paths(&path));
+        let found = self.manager.find(cfg!(windows), dirs);
+        let mut command = Command::new(
+            found.unwrap_or_else(|| PathBuf::from(self.manager.files(cfg!(windows))[0])),
+        );
         let verb = match self.manager {
             Manager::Npm => "install",
             Manager::Pnpm | Manager::Bun => "add",
@@ -297,8 +324,17 @@ impl Asker {
     }
 }
 
-/// The version to update to, if there is one worth trying now.
-async fn pending(ctx: &Context, now: u64, asker: Asker) -> Option<String> {
+/// A newer release than this one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Pending {
+    /// Worth installing now.
+    Install(String),
+    /// Installing it failed lately; it is tried again later.
+    FailedLately(String),
+}
+
+/// The newer release, if there is one.
+async fn pending(ctx: &Context, now: u64, asker: Asker) -> Option<Pending> {
     let mut state = State::load(ctx);
     if asker.due(state.checked_at, now) {
         let registry = std::env::var("SKILLPOUCH_NPM_REGISTRY").unwrap_or_else(|_| REGISTRY.into());
@@ -312,7 +348,11 @@ async fn pending(ctx: &Context, now: u64, asker: Asker) -> Option<String> {
     let latest = state.latest.filter(|latest| newer(latest, VERSION))?;
     let failed_lately = state.failed.as_deref() == Some(latest.as_str())
         && now.saturating_sub(state.failed_at) < RETRY_AFTER;
-    (!failed_lately).then_some(latest)
+    Some(if failed_lately {
+        Pending::FailedLately(latest)
+    } else {
+        Pending::Install(latest)
+    })
 }
 
 fn remember_failure(ctx: &Context, version: &str, now: u64) {
@@ -332,7 +372,9 @@ pub async fn before_command(ctx: &Context) -> Option<ExitCode> {
     let exe = exe()?;
     let installer = installer(&exe)?;
     let now = crate::context::unix_now();
-    let latest = pending(ctx, now, Asker::Command).await?;
+    let Pending::Install(latest) = pending(ctx, now, Asker::Command).await? else {
+        return None;
+    };
     let line = installer.manager.install_line();
     let spinner = ui::Spinner::start(format!("Updating SkillPouch {VERSION} → {latest}…"));
     let result = install(ctx, installer, &latest, LOCKED_WHILE_RUNNING).await;
@@ -453,11 +495,19 @@ pub async fn in_dashboard(ctx: &Context, tell: impl Fn(Upgrade)) {
     };
     tell(Upgrade::Checking);
     let now = crate::context::unix_now();
-    let Some(latest) = pending(ctx, now, Asker::Dashboard).await else {
-        return tell(Upgrade::UpToDate);
+    let line = installer.manager.install_line();
+    let latest = match pending(ctx, now, Asker::Dashboard).await {
+        None => return tell(Upgrade::UpToDate),
+        // Said every time, until it is installed one way or another.
+        Some(Pending::FailedLately(latest)) => {
+            return tell(Upgrade::Failed {
+                reason: format!("SkillPouch {latest} is out, but installing it failed"),
+                hint: Some(format!("Run `{line}`.")),
+            });
+        }
+        Some(Pending::Install(latest)) => latest,
     };
     tell(Upgrade::Installing(latest.clone()));
-    let line = installer.manager.install_line();
     match install(ctx, installer, &latest, LOCKED_WHILE_RUNNING).await {
         Ok(()) => tell(Upgrade::Installed(latest)),
         Err(error) => {
@@ -488,7 +538,7 @@ pub async fn in_background(ctx: &Context, log: &crate::daemon::Log) -> bool {
         return false;
     };
     let now = crate::context::unix_now();
-    let Some(latest) = pending(ctx, now, Asker::Background).await else {
+    let Some(Pending::Install(latest)) = pending(ctx, now, Asker::Background).await else {
         return false;
     };
     match install(ctx, installer, &latest, false).await {
@@ -715,6 +765,30 @@ mod tests {
         );
         assert!(temporary(npx));
         assert_eq!(installer(npx), None);
+    }
+
+    #[test]
+    fn finds_the_package_manager_windows_can_run() -> std::io::Result<()> {
+        let root = tempfile::tempdir()?;
+        let prefix = root.path().join("npm");
+        let nodejs = root.path().join("nodejs");
+        std::fs::create_dir_all(&prefix)?;
+        std::fs::create_dir_all(&nodejs)?;
+        // npm's global prefix holds only the shell script; Node's folder has both.
+        std::fs::write(prefix.join("npm"), b"#!/bin/sh")?;
+        std::fs::write(nodejs.join("npm"), b"#!/bin/sh")?;
+        std::fs::write(nodejs.join("npm.cmd"), b"@echo off")?;
+        let dirs = || [prefix.clone(), nodejs.clone()];
+
+        assert_eq!(
+            Manager::Npm.find(true, dirs()),
+            Some(nodejs.join("npm.cmd"))
+        );
+        assert_eq!(Manager::Npm.find(false, dirs()), Some(prefix.join("npm")));
+        assert_eq!(Manager::Pnpm.find(true, dirs()), None);
+        // Not found anywhere: the name Windows would need.
+        assert_eq!(Manager::Npm.files(true)[0], "npm.cmd");
+        Ok(())
     }
 
     #[test]
