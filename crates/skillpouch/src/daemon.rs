@@ -585,6 +585,9 @@ pub fn local_signature(ctx: &Context) -> u64 {
             {
                 add(path, false);
             }
+            for path in sp_sync::settings::files(&target) {
+                add(&path, false);
+            }
             let commands = target.commands.as_ref().map(|(dir, _)| dir);
             let agents = target.agents.as_ref().map(|(dir, _)| dir);
             for dir in [target.skills.as_ref(), agents, commands]

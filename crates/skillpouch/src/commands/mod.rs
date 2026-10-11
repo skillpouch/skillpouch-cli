@@ -2,6 +2,7 @@ mod home;
 mod login;
 mod logout;
 mod select;
+mod settings;
 mod status;
 mod sync;
 mod tui;
@@ -69,6 +70,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         Command::Logout => logout::run(&ctx).await,
         Command::Status { json } => status::run(&ctx, json).await,
         Command::Sync => sync::once(&ctx).await,
+        Command::Settings { action } => settings::run(&ctx, action),
         Command::Daemon { action } => match action {
             DaemonAction::Start => sync::start(&ctx),
             DaemonAction::Stop => sync::stop(&ctx),

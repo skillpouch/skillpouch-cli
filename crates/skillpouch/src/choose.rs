@@ -13,7 +13,7 @@ use sp_sync::release::Released;
 use sp_sync::status::Phase;
 
 /// The kinds, as the pouch names them and as people read them.
-pub const KINDS: [(&str, &str); 7] = sp_harness::POUCH_KINDS;
+pub const KINDS: [(&str, &str); 8] = sp_harness::POUCH_KINDS;
 
 /// An assistant or a kind, by id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +40,7 @@ pub fn parse(text: &str) -> Option<Choice> {
                 || kind == singular
                 || label.to_lowercase().replace(' ', "-") == wanted
                 || (singular == "mcp" && kind == "mcp-server")
+                || (wanted == "settings" && kind == "setting")
         })
         .map(|(kind, _)| Choice::Kind(kind))
 }
@@ -134,6 +135,8 @@ mod tests {
         assert_eq!(parse("mcp"), Some(Choice::Kind("mcp_server")));
         assert_eq!(parse("MCP servers"), Some(Choice::Kind("mcp_server")));
         assert_eq!(parse("mcp_server"), Some(Choice::Kind("mcp_server")));
+        assert_eq!(parse("settings"), Some(Choice::Kind("setting")));
+        assert_eq!(label(Choice::Kind("setting")), "Settings");
         assert_eq!(parse("nope"), None);
         assert_eq!(label(Choice::Kind("mcp_server")), "MCP servers");
         assert_eq!(label(Choice::Assistant("gemini-cli")), "Gemini CLI");

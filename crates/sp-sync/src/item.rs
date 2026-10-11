@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Kind, its folder in the pouch and its main file, as the web stores them.
-pub const KINDS: [(&str, &str, &str); 7] = [
+pub const KINDS: [(&str, &str, &str); 8] = [
     ("instructions", "instructions", "INSTRUCTIONS.md"),
     ("skill", "skills", "SKILL.md"),
     ("agent", "agents", "AGENT.md"),
@@ -16,6 +16,7 @@ pub const KINDS: [(&str, &str, &str); 7] = [
     ("mcp_server", "mcp-servers", "server.json"),
     ("hook", "hooks", "hook.json"),
     ("plugin", "plugins", "plugin.json"),
+    ("setting", "settings", "setting.json"),
 ];
 
 /// A pouch has one set of instructions, always under this name.

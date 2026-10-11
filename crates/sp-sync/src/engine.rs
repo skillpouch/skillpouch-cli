@@ -114,6 +114,13 @@ pub fn plan(
                         let mine_changed = mine.fingerprint != agreed.fingerprint;
                         let theirs_changed = theirs.revision_id != agreed.revision_id;
                         match (mine_changed, theirs_changed) {
+                            (true, true) if mine.item.kind == "setting" => {
+                                // Download the verified head first. Projection
+                                // merges entries against the device baseline;
+                                // a local edit then wins without a conflict
+                                // copy or losing unrelated remote entries.
+                                plan.receive.push(key.clone());
+                            }
                             (true, false) => plan.send.push(update()),
                             (true, true) => {
                                 // On top of the agreed version: a conflict on the server.
@@ -128,6 +135,7 @@ pub fn plan(
                             (false, _) => plan.receive.push(key.clone()),
                         }
                     }
+                    None if mine.item.kind == "setting" => plan.receive.push(key.clone()),
                     None if options.prefer == Prefer::Computer => plan.send.push(update()),
                     None => plan.copies.push(key.clone()),
                 }
@@ -137,6 +145,10 @@ pub fn plan(
             (Some(mine), None) => match theirs
                 .filter(|base| agreed.is_none_or(|a| a.artifact_id == base.artifact_id))
             {
+                // A signed delete of settings stops this harness's settings
+                // sync, even if local preferences changed at the same time.
+                // Only the encrypted pouch item is removed, never the config.
+                Some(_) if mine.item.kind == "setting" => plan.remove.push(key.clone()),
                 // Deleted on the server (a signed delete), untouched here.
                 Some(_) if agreed.is_some_and(|a| a.fingerprint == mine.fingerprint) => {
                     plan.remove.push(key.clone());
@@ -163,7 +175,8 @@ pub fn plan(
             },
             (None, Some(theirs)) => {
                 let deleted_here = agreed.is_some_and(|a| a.revision_id == theirs.revision_id);
-                let first_meeting = agreed.is_none() && options.delete_unmatched;
+                let first_meeting =
+                    agreed.is_none() && options.delete_unmatched && theirs.kind != "setting";
                 if deleted_here || first_meeting {
                     plan.send.push(Change::Delete {
                         base: theirs.clone(),
@@ -706,6 +719,75 @@ mod tests {
         assert_eq!(plan.remove, ["skill/deleted"]);
         assert_eq!(kinds(&plan), ["create missing"]);
         assert_eq!(plan.reupload, ["skill/missing"]);
+    }
+
+    #[test]
+    fn first_settings_meeting_never_deletes_or_creates_a_conflict_copy() {
+        let mut mine = local_item("claude-code", "mine");
+        mine.item.kind = "setting".into();
+        let mut theirs = remote_item("claude-code", "r1", "theirs", false);
+        theirs.kind = "setting".into();
+        theirs.body.kind = "setting".into();
+        let (local, remote, state) = sides(&[mine], &[theirs], &[]);
+        let first = plan(
+            &local,
+            &remote,
+            &state,
+            Options {
+                prefer: Prefer::Computer,
+                delete_unmatched: true,
+            },
+        );
+        assert_eq!(first.receive, ["setting/claude-code"]);
+        assert!(first.copies.is_empty() && first.send.is_empty());
+
+        let mut theirs = remote_item("codex", "r1", "theirs", false);
+        theirs.kind = "setting".into();
+        theirs.body.kind = "setting".into();
+        let (local, remote, state) = sides(&[], &[theirs], &[]);
+        let plan = plan(
+            &local,
+            &remote,
+            &state,
+            Options {
+                prefer: Prefer::Computer,
+                delete_unmatched: true,
+            },
+        );
+        assert_eq!(plan.receive, ["setting/codex"]);
+        assert!(plan.send.is_empty());
+    }
+
+    #[test]
+    fn a_signed_settings_delete_does_not_resurrect_local_preferences() {
+        let mut mine = local_item("codex", "changed");
+        mine.item.kind = "setting".into();
+        let mut theirs = remote_item("codex", "r2", "old", true);
+        theirs.kind = "setting".into();
+        theirs.body.kind = "setting".into();
+        let mut agreed = agreed_on("codex", "r1", "old");
+        agreed.0 = "setting/codex".into();
+        agreed.1.kind = "setting".into();
+        let (local, remote, state) = sides(&[mine], &[theirs], &[agreed]);
+        let plan = plan(&local, &remote, &state, Options::default());
+        assert_eq!(plan.remove, ["setting/codex"]);
+        assert!(plan.send.is_empty());
+    }
+
+    #[test]
+    fn concurrent_settings_edits_download_before_per_entry_merge() {
+        let mut mine = local_item("codex", "locally edited");
+        mine.item.kind = "setting".into();
+        let mut theirs = remote_item("codex", "r2", "remotely edited", false);
+        theirs.kind = "setting".into();
+        theirs.body.kind = "setting".into();
+        let mut agreed = agreed_on("codex", "r1", "old");
+        agreed.0 = "setting/codex".into();
+        agreed.1.kind = "setting".into();
+        let (local, remote, state) = sides(&[mine], &[theirs], &[agreed]);
+        let plan = plan(&local, &remote, &state, Options::default());
+        assert_eq!(plan.receive, ["setting/codex"]);
+        assert!(plan.send.is_empty() && plan.conflicts.is_empty());
     }
 
     #[test]
