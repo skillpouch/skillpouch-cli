@@ -1959,6 +1959,79 @@ async fn an_item_listed_twice_is_refused_before_anything_changes() -> TestResult
 }
 
 #[tokio::test]
+async fn sibling_heads_for_one_artifact_are_refused_before_pin_changes() -> TestResult {
+    let h = Harness::new().await?;
+    let artifact = h.put_item(&h.device, "pdf", "# base\n")?;
+    h.sync().await?;
+    let original = h.world().artifacts[0].clone();
+    let parent = original["head"]["id"]
+        .as_str()
+        .ok_or("missing parent")?
+        .to_string();
+    let first = h.revision(
+        &h.device,
+        Revision {
+            artifact_id: &artifact,
+            parent: Some(&parent),
+            name: "pdf",
+            text: "# first sibling\n",
+            ..Revision::default()
+        },
+    )?;
+    let second = h.revision(
+        &h.device,
+        Revision {
+            artifact_id: &artifact,
+            parent: Some(&parent),
+            name: "pdf",
+            text: "# second sibling\n",
+            ..Revision::default()
+        },
+    )?;
+    {
+        let mut world = h.world();
+        let row = world.artifacts.first_mut().ok_or("missing artifact")?;
+        row["head"] = first;
+        let mut sibling = original;
+        sibling["head"] = second;
+        world.artifacts.push(sibling);
+    }
+    let before = PouchState::load(&h.home, &h.pouch_id)?;
+    match h.sync().await {
+        Err(SyncError::Invalid(message)) => assert!(message.contains("more than once")),
+        other => panic!("expected duplicate sibling heads to be refused, got {other:?}"),
+    }
+    assert_eq!(PouchState::load(&h.home, &h.pouch_id)?, before);
+    assert_eq!(h.skill_on_disk("pdf").as_deref(), Some("# base\n"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_existing_head_and_its_child_listed_twice_are_refused() -> TestResult {
+    let h = Harness::new().await?;
+    let artifact = h.put_item(&h.device, "pdf", "# base\n")?;
+    h.sync().await?;
+    let old_row = h.world().artifacts[0].clone();
+    h.edit(
+        &h.device,
+        &artifact,
+        Edit {
+            text: "# child\n",
+            ..Edit::default()
+        },
+    )?;
+    h.world().artifacts.push(old_row);
+    let before = PouchState::load(&h.home, &h.pouch_id)?;
+    match h.sync().await {
+        Err(SyncError::Invalid(message)) => assert!(message.contains("more than once")),
+        other => panic!("expected parent and child listing to be refused, got {other:?}"),
+    }
+    assert_eq!(PouchState::load(&h.home, &h.pouch_id)?, before);
+    assert_eq!(h.skill_on_disk("pdf").as_deref(), Some("# base\n"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_head_listed_under_another_item_is_refused() -> TestResult {
     let h = Harness::new().await?;
     let a = h.put_item(&h.device, "a", "# a\n")?;
@@ -2003,6 +2076,7 @@ async fn an_honest_server_keeps_a_withheld_delete_from_being_undone() -> TestRes
     h.add_member(&other, "device")?;
     let artifact = h.put_item(&h.device, "pdf", "# PDF\n")?;
     h.sync().await?;
+    let agreement = PouchState::load(&h.home, &h.pouch_id)?.items["skill/pdf"].clone();
     h.edit(
         &other,
         &artifact,
@@ -2023,6 +2097,11 @@ async fn an_honest_server_keeps_a_withheld_delete_from_being_undone() -> TestRes
         "no item under a new id"
     );
     assert_eq!(h.skill_on_disk("pdf").as_deref(), Some("# PDF\n"));
+    assert_eq!(
+        PouchState::load(&h.home, &h.pouch_id)?.items["skill/pdf"],
+        agreement,
+        "a rejected duplicate-ID create must retain the previous agreement"
+    );
 
     // Once the delete is listed, it's applied here.
     h.world().hide_deleted_from_listing = false;
