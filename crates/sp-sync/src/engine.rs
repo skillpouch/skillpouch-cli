@@ -9,7 +9,7 @@
 //! this computer's is kept as `<name>-conflict` then. Nothing is ever lost.
 
 use crate::item::{self, Files, LocalItem, PouchDir, Skipped};
-use crate::remote::{Change, Committed, Listing, Remote, RemoteItem};
+use crate::remote::{Change, Committed, Head, Listing, Remote, RemoteItem};
 use crate::state::{Agreed, PouchState};
 use crate::{Result, SyncError};
 use std::collections::{BTreeMap, BTreeSet};
@@ -132,7 +132,11 @@ pub fn plan(
                     None => plan.copies.push(key.clone()),
                 }
             }
-            (Some(mine), None) => match theirs {
+            // A signed delete only speaks for its own item: an older item that
+            // had this name doesn't delete the one agreed here since.
+            (Some(mine), None) => match theirs
+                .filter(|base| agreed.is_none_or(|a| a.artifact_id == base.artifact_id))
+            {
                 // Deleted on the server (a signed delete), untouched here.
                 Some(_) if agreed.is_some_and(|a| a.fingerprint == mine.fingerprint) => {
                     plan.remove.push(key.clone());
@@ -209,9 +213,12 @@ where
 {
     let high_water = remote.pouch.event_seq;
     let listing = remote.list().await?;
-    // Progress a known artifact only along the signed primary-parent chain.
-    // Merely seeing a descendant must not blacklist intermediate revisions:
-    // a later listing can legitimately expose them while replicas converge.
+    // A known artifact only moves forward along its signed primary-parent
+    // chain. A head whose chain to the last verified one can't be proven
+    // (its history freed, withheld or forged) is held: neither written nor
+    // deleted here, and the rest of the pouch syncs on.
+    let mut unproven: BTreeSet<String> = BTreeSet::new();
+    let mut accepted: Vec<(&Head, Vec<String>)> = Vec::new();
     for head in &listing.heads {
         if state.is_rollback(&head.artifact_id, &head.revision_id) {
             return Err(SyncError::Rollback(head.key.clone()));
@@ -219,47 +226,75 @@ where
         let pinned = state
             .seen
             .get(&head.artifact_id)
-            .map(|seen| seen.head.as_str())
+            .map(|seen| seen.head.clone())
             .or_else(|| {
                 state
                     .items
                     .values()
                     .find(|agreed| agreed.artifact_id == head.artifact_id)
-                    .map(|agreed| agreed.revision_id.as_str())
+                    .map(|agreed| agreed.revision_id.clone())
             });
-        if let Some(pinned) = pinned
-            && head.revision_id != pinned
-            && head.parent_id.as_deref() != Some(pinned)
-        {
-            return Err(SyncError::Invalid(format!(
-                "cannot verify revision progression for {}: its signed parent is not the last verified head; refusing to sync this listing",
-                head.key
-            )));
+        match pinned {
+            Some(pinned)
+                if head.revision_id != pinned && head.parent_id.as_deref() != Some(&pinned) =>
+            {
+                match remote.descends_from(head, &pinned).await? {
+                    Some(between) => accepted.push((head, between)),
+                    None => {
+                        unproven.insert(head.artifact_id.clone());
+                    }
+                }
+            }
+            _ => accepted.push((head, Vec::new())),
         }
     }
-    for head in &listing.heads {
+    for (head, between) in accepted {
         state.saw(
             &head.artifact_id,
             &head.revision_id,
-            head.parents.iter().map(String::as_str),
+            head.parents.iter().chain(&between).map(String::as_str),
         );
     }
     state.epoch.clone_from(&remote.pouch.epoch);
     checkpoint(state)?;
     let Listing {
-        items: remote_items,
+        items: mut remote_items,
+        collisions,
         unreadable,
         ..
     } = listing;
+    let mut unresolved_collisions = BTreeSet::new();
+    for (key, candidates) in collisions {
+        if let Some(agreed) = state.items.get(&key)
+            && let Some(holder) = candidates
+                .into_iter()
+                .find(|candidate| candidate.artifact_id == agreed.artifact_id)
+        {
+            remote_items.insert(key, holder);
+        } else {
+            unresolved_collisions.insert(key);
+        }
+    }
     let (folder, skipped) = dir.read()?;
     // An item whose server version doesn't verify is left alone on both
     // sides: a tampered head must not delete or replace it here.
-    let held: BTreeSet<String> = state
-        .items
-        .iter()
-        .filter(|(_, agreed)| unreadable.contains(&agreed.artifact_id))
-        .map(|(key, _)| key.clone())
-        .collect();
+    let mut held = unresolved_collisions;
+    held.extend(
+        state
+            .items
+            .iter()
+            .filter(|(_, agreed)| {
+                unreadable.contains(&agreed.artifact_id) || unproven.contains(&agreed.artifact_id)
+            })
+            .map(|(key, _)| key.clone()),
+    );
+    held.extend(
+        remote_items
+            .iter()
+            .filter(|(_, item)| unproven.contains(&item.artifact_id))
+            .map(|(key, _)| key.clone()),
+    );
+    remote_items.retain(|key, _| !held.contains(key));
     let local: BTreeMap<String, Local> = folder
         .into_iter()
         .filter(|(key, _)| !held.contains(key))
@@ -272,7 +307,7 @@ where
     planned.items.retain(|key, _| !held.contains(key));
     let plan = plan(&local, &remote_items, &planned, options);
     let mut outcome = Outcome {
-        unreadable: unreadable.len(),
+        unreadable: unreadable.len() + unproven.len(),
         skipped,
         ..Outcome::default()
     };
@@ -301,6 +336,7 @@ where
         outcome.again = true;
     }
 
+    let mut preserve_conflicts = BTreeSet::new();
     if !plan.send.is_empty() {
         for changes in plan.send.chunks(OPS_PER_COMMIT) {
             let results = remote.commit(changes).await?;
@@ -360,6 +396,9 @@ where
                     Committed::Conflict if plan.conflicts.contains(&key) => outcome.conflicts += 1,
                     Committed::Conflict => outcome.again = true,
                     Committed::Rejected(reason) => {
+                        if plan.conflicts.contains(&key) {
+                            preserve_conflicts.insert(key.clone());
+                        }
                         outcome.rejected.push(format!("{key}: {reason}"))
                     }
                 }
@@ -373,6 +412,7 @@ where
         .iter()
         .chain(&plan.conflicts)
         .chain(&plan.copies)
+        .filter(|key| !preserve_conflicts.contains(*key))
         .filter_map(|key| remote_items.get(key))
         .collect();
     if !incoming.is_empty() {

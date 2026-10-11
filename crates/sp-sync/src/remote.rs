@@ -74,6 +74,9 @@ pub struct Head {
 pub struct Listing {
     /// Global items, deleted ones included, by key.
     pub items: BTreeMap<String, RemoteItem>,
+    /// Multiple verified identities with the same logical key. The sync
+    /// engine resolves these against the last agreed identity or holds them.
+    pub collisions: BTreeMap<String, Vec<RemoteItem>>,
     /// Every head that verified.
     pub heads: Vec<Head>,
     /// Artifacts whose head doesn't verify: listed by id, never trusted.
@@ -245,6 +248,8 @@ impl<'a> Remote<'a> {
     /// Every item's head, deleted ones included.
     pub async fn list(&self) -> Result<Listing> {
         let mut listing = Listing::default();
+        let mut seen_artifact_ids = BTreeSet::new();
+        let mut by_key: BTreeMap<String, Vec<RemoteItem>> = BTreeMap::new();
         let mut cursor: Option<String> = None;
         loop {
             let (page, next) = self
@@ -253,10 +258,22 @@ impl<'a> Remote<'a> {
                 .await?;
             for artifact in page {
                 let Some(head) = artifact.head else { continue };
+                if !seen_artifact_ids.insert(artifact.id.clone()) {
+                    return Err(SyncError::Invalid(format!(
+                        "the server listed artifact {} more than once",
+                        artifact.id
+                    )));
+                }
                 let Ok(body) = self.open_head(&head) else {
                     listing.unreadable.insert(artifact.id);
                     continue;
                 };
+                if artifact.id != body.artifact_id {
+                    return Err(SyncError::Invalid(format!(
+                        "artifact {} contains a signed revision for {}",
+                        artifact.id, body.artifact_id
+                    )));
+                }
                 listing.heads.push(Head {
                     artifact_id: body.artifact_id.clone(),
                     revision_id: body.revision_id.clone(),
@@ -286,22 +303,64 @@ impl<'a> Remote<'a> {
                     deleted: body.deleted,
                     body,
                 };
-                let key = item.key();
-                // A live item beats a deleted one with the same name.
-                if listing
-                    .items
-                    .get(&key)
-                    .is_none_or(|existing| existing.deleted)
-                {
-                    listing.items.insert(key, item);
-                }
+                by_key.entry(item.key()).or_default().push(item);
             }
             match next {
                 Some(next) => cursor = Some(next),
                 None => break,
             }
         }
+        // A live item beats deleted ones with the same name. Several live
+        // ones (a name collision the API keeps hidden until it's resolved),
+        // or several deletes, are matched by the engine against the item
+        // agreed here.
+        for (key, items) in by_key {
+            let (live, deleted): (Vec<RemoteItem>, Vec<RemoteItem>) =
+                items.into_iter().partition(|item| !item.deleted);
+            let group = if live.is_empty() { deleted } else { live };
+            match <[RemoteItem; 1]>::try_from(group) {
+                Ok([item]) => {
+                    listing.items.insert(key, item);
+                }
+                Err(group) => {
+                    listing.collisions.insert(key, group);
+                }
+            }
+        }
         Ok(listing)
+    }
+
+    /// Follows `head`'s signed primary parents back to `pinned`, verifying
+    /// each revision on the way. Returns the revisions in between, or `None`
+    /// when the chain can't be proven (history freed, withheld or forged).
+    pub async fn descends_from(&self, head: &Head, pinned: &str) -> Result<Option<Vec<String>>> {
+        const MAX_STEPS: usize = 64;
+        let mut between = Vec::new();
+        let mut parent = head.parent_id.clone();
+        while let Some(id) = parent {
+            if id == pinned {
+                return Ok(Some(between));
+            }
+            if between.len() == MAX_STEPS || between.contains(&id) {
+                return Ok(None);
+            }
+            let fetched = self
+                .client
+                .revisions(self.key, &self.token, &self.pouch.id, &[&id])
+                .await?;
+            let Some(record) = fetched.into_iter().find(|record| record.id == id) else {
+                return Ok(None);
+            };
+            let Ok(body) = self.open_head(&record) else {
+                return Ok(None);
+            };
+            if body.artifact_id != head.artifact_id || body.revision_id != id {
+                return Ok(None);
+            }
+            between.push(id);
+            parent = body.parent_id;
+        }
+        Ok(None)
     }
 
     /// Verifies a head revision and opens its body.

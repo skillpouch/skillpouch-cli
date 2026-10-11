@@ -1,7 +1,7 @@
 use crate::types::{
     ArtifactList, ArtifactRecord, BlobCheck, BlobMissing, CliAuthCreate, CliAuthCreated,
     CliAuthToken, CommitRequest, CommitResponse, ConflictList, DeviceList, DeviceTokens, EventPage,
-    KeyEnvelopes, Me, PouchList, Roster, UsageReport, UsageSummary,
+    KeyEnvelopes, Me, PouchList, RevisionRecord, Roster, UsageReport, UsageSummary,
 };
 use crate::{ApiError, Result};
 use reqwest::{Method, StatusCode};
@@ -246,6 +246,33 @@ impl Client {
         let (page, next) =
             parse_envelope::<Page>(reply.status, &String::from_utf8_lossy(&reply.bytes))?;
         Ok((page.items, next))
+    }
+
+    /// Revisions by id; ids the server doesn't have are left out.
+    pub async fn revisions(
+        &self,
+        key: &SignKey,
+        access_token: &str,
+        pouch_id: &str,
+        ids: &[&str],
+    ) -> Result<Vec<RevisionRecord>> {
+        #[derive(serde::Deserialize)]
+        struct Revisions {
+            revisions: Vec<RevisionRecord>,
+        }
+        let path = format!(
+            "/v1/pouches/{pouch_id}/revisions?ids={}",
+            encode_query(&ids.join(","))
+        );
+        let reply = self
+            .exchange(&Call {
+                access_token: Some(access_token),
+                ..Call::new(Method::GET, &path, key)
+            })
+            .await?;
+        let (data, _) =
+            parse_envelope::<Revisions>(reply.status, &String::from_utf8_lossy(&reply.bytes))?;
+        Ok(data.revisions)
     }
 
     /// Which of these blobs the server doesn't have yet (and reserves quota for them).
