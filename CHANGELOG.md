@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.1](https://github.com/skillpouch/skillpouch-cli/compare/v0.4.0...v0.4.1) (2026-10-11)
+
+### Bug fixes
+
+* **cli:** find npm on windows when updating ([a94ddf3](https://github.com/skillpouch/skillpouch-cli/commit/a94ddf34c10c8be5fc8b8c79adf8e0934dc969c6))
+
 ## [0.4.0](https://github.com/skillpouch/skillpouch-cli/compare/v0.3.0...v0.4.0) (2026-10-11)
 
 ### Features
