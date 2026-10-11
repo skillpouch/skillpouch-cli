@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.0](https://github.com/skillpouch/skillpouch-cli/compare/v0.4.1...v0.5.0) (2026-10-11)
+
+### Features
+
+* **sync:** sync assistant settings such as custom providers and API keys ([80612a5](https://github.com/skillpouch/skillpouch-cli/commit/80612a58a9c991781849227b58f84bbca7aafc05))
+
 ## [0.4.1](https://github.com/skillpouch/skillpouch-cli/compare/v0.4.0...v0.4.1) (2026-10-11)
 
 ### Bug fixes
