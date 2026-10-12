@@ -718,6 +718,13 @@ fn merge(
 }
 
 fn apply(root: &Path, id: &str, entries: &Entries, backups: &Path) -> Result<Vec<PathBuf>> {
+    if let Some(repo) = sp_harness::git_checkout(root) {
+        return Err(invalid(format!(
+            "{} is part of the git checkout {}, so SkillPouch only reads it",
+            root.display(),
+            repo.display()
+        )));
+    }
     let mut backed_up = Vec::new();
     let mut staged: BTreeMap<String, String> = BTreeMap::new();
     for (entry, value) in entries {
@@ -925,7 +932,10 @@ pub fn project(
         .harnesses
         .retain(|id, _| installed.contains(id.as_str()));
     for target in targets {
-        if sp_harness::settings(target.id).is_empty() || target.read_only.is_some() {
+        if sp_harness::settings(target.id).is_empty()
+            || target.read_only.is_some()
+            || sp_harness::git_checkout(&target.settings).is_some()
+        {
             continue;
         }
         let Some(item) = items.get(&format!("setting/{}", target.id)) else {
@@ -1442,6 +1452,64 @@ mod tests {
         assert_eq!(config["editor"]["vimMode"], json!(true));
         assert_eq!(config["version"], json!(1));
         assert_eq!(config["hasChangedDefaultModel"], json!(false));
+        Ok(())
+    }
+
+    #[test]
+    fn a_moved_cursor_config_is_found_and_left_alone_in_a_checkout() -> Result<()> {
+        let temp = tempfile::tempdir().map_err(io(Path::new("temp")))?;
+        let home = temp.path().join("home");
+        let dotfiles = temp.path().join("dotfiles");
+        let config = dotfiles.join("cursor");
+        fs::create_dir_all(dotfiles.join(".git")).map_err(io(&dotfiles))?;
+        fs::create_dir_all(&config).map_err(io(&config))?;
+        let file = config.join("cli-config.json");
+        let before = r#"{"version": 1, "editor": {"vimMode": false}}"#;
+        fs::write(&file, before).map_err(io(&file))?;
+        let mut places = sp_harness::Places::plain(&home, &home.join(".skillpouch"));
+        places.cursor_config = config.clone();
+        let found = sp_harness::targets(&places);
+        let cursor = found.iter().find(|target| target.id == "cursor");
+        assert_eq!(cursor.map(|target| target.settings.clone()), Some(config));
+        // With the editor's folder outside the checkout, only the settings
+        // folder is in it.
+        fs::create_dir_all(home.join(".cursor")).map_err(io(&home))?;
+        let targets = sp_harness::targets(&places);
+        let cursor = targets.iter().find(|target| target.id == "cursor");
+        assert!(cursor.is_some_and(|target| target.read_only.is_none()));
+
+        let mut setting = Setting {
+            harness: "cursor".into(),
+            format: None,
+            files: BTreeMap::new(),
+        };
+        setting.set("cli-config.json:editor", json!({"vimMode": true}));
+        let item = setting.item()?;
+        let dir = PouchDir::new(temp.path().join("pouch"));
+        dir.write_item("setting", "cursor", &item.files)?;
+        let backups = temp.path().join("backups");
+        project(
+            &dir,
+            &dir.read()?.0,
+            &targets,
+            &mut DeviceState::default(),
+            &backups,
+        )?;
+        assert_eq!(fs::read_to_string(&file).map_err(io(&file))?, before);
+        let root = cursor
+            .map(|target| target.settings.clone())
+            .unwrap_or_default();
+        let mut state = HarnessState::default();
+        let included = include(
+            &root,
+            "cursor",
+            "cli-config.json:editor",
+            &item,
+            &backups,
+            &mut state,
+        );
+        assert!(included.is_err());
+        assert_eq!(fs::read_to_string(&file).map_err(io(&file))?, before);
         Ok(())
     }
 

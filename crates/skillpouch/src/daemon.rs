@@ -794,9 +794,18 @@ mod service {
     use std::path::Path;
     use std::process::{Command, Stdio};
 
-    /// Settings passed on so the service uses the same folder. The server
-    /// isn't: the service syncs with whichever one this computer logged in to.
-    const PASSED_ON: [&str; 2] = ["HOME", "SKILLPOUCH_HOME"];
+    /// Settings passed on so the service uses the same folders, its own and
+    /// the assistants' (`sp_harness::Places::of`). The server isn't: the
+    /// service syncs with whichever one this computer logged in to.
+    pub(super) const PASSED_ON: [&str; 7] = [
+        "HOME",
+        "SKILLPOUCH_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "XDG_CONFIG_HOME",
+        "CODEX_HOME",
+        "COPILOT_HOME",
+        "CURSOR_CONFIG_DIR",
+    ];
 
     fn quiet(command: &mut Command) -> bool {
         command
@@ -971,6 +980,19 @@ mod service {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_service_finds_the_assistants_where_this_shell_does() {
+        for name in [
+            "CLAUDE_CONFIG_DIR",
+            "XDG_CONFIG_HOME",
+            "CODEX_HOME",
+            "COPILOT_HOME",
+            "CURSOR_CONFIG_DIR",
+        ] {
+            assert!(service::PASSED_ON.contains(&name), "{name}");
+        }
+    }
 
     #[test]
     fn the_windows_login_command_quotes_its_paths() {

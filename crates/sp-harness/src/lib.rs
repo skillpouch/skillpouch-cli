@@ -879,7 +879,8 @@ fn layouts(places: &Places) -> Vec<Layout> {
             id: "cursor",
             name: "Cursor",
             root: places.cursor.clone(),
-            markers: vec![],
+            // The CLI's folder, when a variable moved it.
+            markers: vec![places.cursor_config.clone()],
             instructions: None,
             skills: vec![places.cursor.join("skills")],
             agents: &[],
