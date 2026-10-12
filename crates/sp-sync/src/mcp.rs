@@ -158,7 +158,7 @@ pub fn read(path: &Path, format: McpFormat) -> BTreeMap<String, Server> {
             .unwrap_or_default(),
         _ => serde_json::from_str::<Value>(&sp_harness::strip_jsonc(&text))
             .ok()
-            .map(|value| object(&value, key_of(format)))
+            .map(|value| sp_harness::mcp_entries(&value, key_of(format)))
             .unwrap_or_default(),
     };
     entries
@@ -189,13 +189,23 @@ pub fn write(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(io(path)(error)),
     };
-    let native: BTreeMap<String, Value> = servers
+    let mut native: BTreeMap<String, Value> = servers
         .iter()
         .filter_map(|(name, server)| Some((name.clone(), to_native(format, server)?)))
         .collect();
+    let opencode_2 = format == McpFormat::OpenCode && opencode_nests(&text, path);
+    if opencode_2 {
+        // OpenCode 2 turns servers off with `disabled`; it has no `enabled`.
+        for entry in native.values_mut() {
+            if let Some(fields) = entry.as_object_mut() {
+                fields.remove("enabled");
+            }
+        }
+    }
     let updated = match format {
         McpFormat::Codex => write_toml(&text, &native, managed),
-        _ => write_json(&text, key_of(format), &native, managed),
+        _ if opencode_2 => write_json(&text, &[key_of(format), "servers"], &native, managed),
+        _ => write_json(&text, &[key_of(format)], &native, managed),
     };
     let updated = match updated {
         Ok(updated) => updated,
@@ -227,16 +237,32 @@ fn restrict_like_before(path: &Path) {
     let _ = path;
 }
 
+/// Whether an OpenCode config keeps its servers in `mcp.servers` (OpenCode
+/// 2): as it does already, or, with no servers yet, as the installed
+/// OpenCode reads them.
+fn opencode_nests(text: &str, path: &Path) -> bool {
+    let value: Value = serde_json::from_str(&sp_harness::strip_jsonc(text)).unwrap_or_default();
+    if let Some(map) = value.get("mcp").and_then(Value::as_object) {
+        if sp_harness::nested_servers(map).is_some() {
+            return true;
+        }
+        if map.values().any(Value::is_object) {
+            return false;
+        }
+    }
+    crate::settings::local_format(path.parent().unwrap_or(Path::new("."))) == 2
+}
+
 fn write_json(
     text: &str,
-    key: &str,
+    path: &[&str],
     native: &BTreeMap<String, Value>,
     managed: &BTreeSet<String>,
 ) -> std::result::Result<String, String> {
     if text.trim().is_empty() && native.is_empty() {
         return Ok(text.to_string());
     }
-    crate::jsonc::set_entries(text, key, native, managed)
+    crate::jsonc::set_entries(text, path, native, managed)
 }
 
 fn write_toml(
@@ -405,6 +431,60 @@ mod tests {
             read(&jsonc, McpFormat::OpenCode).contains_key("gh"),
             "{text}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn opencode_2_servers_go_under_servers_without_enabled() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(io(Path::new(".")))?;
+        let path = dir.path().join("opencode.json");
+        fs::write(
+            &path,
+            "{\n  \"plugins\": [],\n  \"mcp\": {\n    \"servers\": {\n      // mine\n      \"mine\": { \"type\": \"local\", \"command\": [\"a\"] }\n    }\n  }\n}\n",
+        )
+        .map_err(io(&path))?;
+        let mut servers = BTreeMap::new();
+        servers.insert("gh".to_string(), stdio());
+        write(&path, McpFormat::OpenCode, &servers, &BTreeSet::new())?;
+        let text = fs::read_to_string(&path).map_err(io(&path))?;
+        let value: Value =
+            serde_json::from_str(&sp_harness::strip_jsonc(&text)).unwrap_or_default();
+        assert!(text.contains("// mine"), "{text}");
+        assert_eq!(
+            value["mcp"]["servers"]["gh"],
+            json!({ "type": "local", "command": ["npx", "-y", "gh-mcp"], "environment": { "TOKEN": "x" } })
+        );
+        assert!(value["mcp"].get("gh").is_none(), "{text}");
+        let names: Vec<_> = read(&path, McpFormat::OpenCode).into_keys().collect();
+        assert_eq!(names, ["gh", "mine"]);
+
+        write(
+            &path,
+            McpFormat::OpenCode,
+            &BTreeMap::new(),
+            &BTreeSet::from(["gh".to_string()]),
+        )?;
+        let names: Vec<_> = read(&path, McpFormat::OpenCode).into_keys().collect();
+        assert_eq!(names, ["mine"]);
+        Ok(())
+    }
+
+    #[test]
+    fn opencode_1_servers_stay_flat() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(io(Path::new(".")))?;
+        let path = dir.path().join("opencode.json");
+        fs::write(
+            &path,
+            r#"{"mcp": {"mine": {"type": "local", "command": ["a"], "enabled": true}}}"#,
+        )
+        .map_err(io(&path))?;
+        let mut servers = BTreeMap::new();
+        servers.insert("gh".to_string(), stdio());
+        write(&path, McpFormat::OpenCode, &servers, &BTreeSet::new())?;
+        let value: Value = serde_json::from_str(&fs::read_to_string(&path).map_err(io(&path))?)
+            .unwrap_or_default();
+        assert_eq!(value["mcp"]["gh"]["enabled"], true);
+        assert!(value["mcp"].get("servers").is_none());
         Ok(())
     }
 }
