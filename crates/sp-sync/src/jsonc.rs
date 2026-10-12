@@ -176,12 +176,12 @@ fn value_of(text: &str, member: &Member) -> Option<Value> {
     .ok()
 }
 
-/// Sets `key` (an object at the top level) to hold `entries` for the names
-/// SkillPouch owns: `managed` names not in `entries` are removed, others
-/// are left as the user has them. Returns the new text.
+/// Sets the object at `path` (keys from the top) to hold `entries` for the
+/// names SkillPouch owns: `managed` names not in `entries` are removed,
+/// others are left as the user has them. Returns the new text.
 pub fn set_entries(
     text: &str,
-    key: &str,
+    path: &[&str],
     entries: &BTreeMap<String, Value>,
     managed: &std::collections::BTreeSet<String>,
 ) -> Parsed<String> {
@@ -195,21 +195,8 @@ pub fn set_entries(
     if text.as_bytes().get(root_open) != Some(&b'{') {
         return Err("it isn't a JSON object".into());
     }
-    let root = object(text.as_bytes(), root_open)?;
-    let servers = match root.members.iter().find(|m| m.name == key) {
-        Some(member) if text.as_bytes()[member.value_start] == b'{' => member.value_start,
-        Some(_) => return Err(format!("`{key}` isn't an object")),
-        None if entries.is_empty() => return Ok(text),
-        None => {
-            let member = format!("{}: {{}}", serde_json::to_string(key).unwrap_or_default());
-            text = insert_member(&text, &root, &member, "", &unit);
-            let root = object(text.as_bytes(), root_open)?;
-            root.members
-                .iter()
-                .find(|m| m.name == key)
-                .map(|m| m.value_start)
-                .ok_or("couldn't add the key")?
-        }
+    let Some(servers) = open_path(&mut text, root_open, path, !entries.is_empty(), &unit)? else {
+        return Ok(text);
     };
 
     // Changes inside the object, applied one at a time on fresh offsets.
@@ -261,27 +248,9 @@ pub fn set_value(text: &str, path: &[&str], value: Option<&Value>) -> Parsed<Str
     if text.as_bytes().get(root) != Some(&b'{') {
         return Err("it isn't a JSON object".into());
     }
-    let mut at = root;
-    for key in parents {
-        let current = object(text.as_bytes(), at)?;
-        match current.members.iter().find(|m| m.name == *key) {
-            Some(member) if text.as_bytes()[member.value_start] == b'{' => at = member.value_start,
-            Some(_) => return Err(format!("`{key}` isn't an object")),
-            None if value.is_none() => return Ok(text),
-            None => {
-                let base = member_indent(&text, &current, &unit);
-                let member = format!("{}: {{}}", serde_json::to_string(key).unwrap_or_default());
-                text = insert_member(&text, &current, &member, &base, &unit);
-                let current = object(text.as_bytes(), at)?;
-                at = current
-                    .members
-                    .iter()
-                    .find(|m| m.name == *key)
-                    .map(|m| m.value_start)
-                    .ok_or("couldn't add the key")?;
-            }
-        }
-    }
+    let Some(at) = open_path(&mut text, root, parents, value.is_some(), &unit)? else {
+        return Ok(text);
+    };
     let current = object(text.as_bytes(), at)?;
     let base = member_indent(&text, &current, &unit);
     let index = current.members.iter().position(|m| m.name == *last);
@@ -305,6 +274,38 @@ pub fn set_value(text: &str, path: &[&str], value: Option<&Value>) -> Parsed<Str
         }
     }
     Ok(text)
+}
+
+/// Where the object at `path` (keys from the object at `at`) opens, adding
+/// the missing objects on the way when `create`; `None` if one is missing.
+fn open_path(
+    text: &mut String,
+    mut at: usize,
+    path: &[&str],
+    create: bool,
+    unit: &str,
+) -> Parsed<Option<usize>> {
+    for key in path {
+        let current = object(text.as_bytes(), at)?;
+        match current.members.iter().find(|m| m.name == *key) {
+            Some(member) if text.as_bytes()[member.value_start] == b'{' => at = member.value_start,
+            Some(_) => return Err(format!("`{key}` isn't an object")),
+            None if !create => return Ok(None),
+            None => {
+                let base = member_indent(text, &current, unit);
+                let member = format!("{}: {{}}", serde_json::to_string(key).unwrap_or_default());
+                *text = insert_member(text, &current, &member, &base, unit);
+                let current = object(text.as_bytes(), at)?;
+                at = current
+                    .members
+                    .iter()
+                    .find(|m| m.name == *key)
+                    .map(|m| m.value_start)
+                    .ok_or("couldn't add the key")?;
+            }
+        }
+    }
+    Ok(Some(at))
 }
 
 /// How the members of `object` are indented (one level in from its line).
@@ -407,7 +408,7 @@ mod tests {
         let managed = BTreeSet::from(["old".to_string(), "gh".to_string()]);
         let out = set_entries(
             text,
-            "mcp",
+            &["mcp"],
             &entries(&[("gh", json!({"type": "remote", "url": "u"}))]),
             &managed,
         )?;
@@ -425,7 +426,7 @@ mod tests {
         assert_eq!(
             set_entries(
                 &out,
-                "mcp",
+                &["mcp"],
                 &entries(&[("gh", json!({"type": "remote", "url": "u"}))]),
                 &managed
             )?,
@@ -434,7 +435,7 @@ mod tests {
         // Changed: only that value is rewritten.
         let changed = set_entries(
             &out,
-            "mcp",
+            &["mcp"],
             &entries(&[("gh", json!({"url": "v"}))]),
             &managed,
         )?;
@@ -447,14 +448,14 @@ mod tests {
     fn creates_the_key_and_the_file() -> Parsed<()> {
         let out = set_entries(
             "",
-            "mcpServers",
+            &["mcpServers"],
             &entries(&[("a", json!({"command": "x"}))]),
             &BTreeSet::new(),
         )?;
         assert_eq!(parsed(&out)["mcpServers"]["a"]["command"], "x");
         let out = set_entries(
             "{\n\t\"theme\": 1\n}",
-            "mcpServers",
+            &["mcpServers"],
             &entries(&[("a", json!({"command": "x"}))]),
             &BTreeSet::new(),
         )?;
@@ -464,11 +465,32 @@ mod tests {
     }
 
     #[test]
+    fn sets_entries_in_a_nested_object() -> Parsed<()> {
+        let path = ["mcp", "servers"];
+        let a = entries(&[("a", json!({"command": ["x"]}))]);
+        let out = set_entries(
+            "{\n  // mine\n  \"model\": \"x\"\n}\n",
+            &path,
+            &a,
+            &BTreeSet::new(),
+        )?;
+        assert!(out.contains("// mine"), "{out}");
+        assert_eq!(parsed(&out)["mcp"]["servers"]["a"]["command"], json!(["x"]));
+        assert_eq!(set_entries(&out, &path, &a, &BTreeSet::new())?, out);
+        // Nothing to set, nothing created.
+        assert_eq!(
+            set_entries("{}", &path, &BTreeMap::new(), &BTreeSet::new())?,
+            "{}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn removing_the_last_entry_leaves_valid_json() -> Parsed<()> {
         let text = "{\"mcpServers\": {\n  \"a\": {},\n  \"b\": {}\n}}";
         let out = set_entries(
             text,
-            "mcpServers",
+            &["mcpServers"],
             &BTreeMap::new(),
             &BTreeSet::from(["b".to_string()]),
         )?;
@@ -476,7 +498,7 @@ mod tests {
         assert_eq!(value["mcpServers"], json!({"a": {}}));
         let out = set_entries(
             &out,
-            "mcpServers",
+            &["mcpServers"],
             &BTreeMap::new(),
             &BTreeSet::from(["a".to_string()]),
         )?;
@@ -507,16 +529,16 @@ mod tests {
 
     #[test]
     fn refuses_what_it_cannot_parse() {
-        assert!(set_entries("[1]", "mcp", &BTreeMap::new(), &BTreeSet::new()).is_err());
+        assert!(set_entries("[1]", &["mcp"], &BTreeMap::new(), &BTreeSet::new()).is_err());
         assert!(
             set_entries(
                 "{\"mcp\": 3}",
-                "mcp",
+                &["mcp"],
                 &entries(&[("a", json!({}))]),
                 &BTreeSet::new()
             )
             .is_err()
         );
-        assert!(set_entries("{\"a\" 1}", "mcp", &BTreeMap::new(), &BTreeSet::new()).is_err());
+        assert!(set_entries("{\"a\" 1}", &["mcp"], &BTreeMap::new(), &BTreeSet::new()).is_err());
     }
 }

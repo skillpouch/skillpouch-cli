@@ -9,8 +9,8 @@
 //!
 //! Claude Code and Factory get `enabledPlugins` and `extraKnownMarketplaces`
 //! entries; plugin folders are offered through a `skillpouch` marketplace
-//! in the pouch's `plugins/` folder. OpenCode gets its `plugin` list. Each
-//! assistant installs the plugins itself.
+//! in the pouch's `plugins/` folder. OpenCode gets its `plugins` list
+//! (`plugin` in OpenCode 1). Each assistant installs the plugins itself.
 
 use crate::error::io;
 use crate::item::{File, LocalItem};
@@ -134,15 +134,41 @@ fn on(path: &Path, format: PluginFormat) -> (BTreeSet<String>, Value) {
             .filter(|(_, on)| on.as_bool() == Some(true))
             .map(|(id, _)| id.clone())
             .collect(),
-        PluginFormat::OpenCode => value
-            .get("plugin")
-            .and_then(Value::as_array)
-            .into_iter()
+        PluginFormat::OpenCode => OPENCODE_KEYS
+            .iter()
+            .filter_map(|key| value.get(key).and_then(Value::as_array))
             .flatten()
-            .filter_map(|p| p.as_str().map(str::to_string))
+            .filter_map(package)
             .collect(),
     };
     (ids, value)
+}
+
+/// OpenCode 2's plugin list, then OpenCode 1's.
+const OPENCODE_KEYS: [&str; 2] = ["plugins", "plugin"];
+
+/// The package of an OpenCode plugin entry: `"pkg"`, OpenCode 1's
+/// `["pkg", {options}]` or OpenCode 2's `{"package": "pkg", "options": {…}}`.
+fn package(entry: &Value) -> Option<String> {
+    match entry {
+        Value::String(package) => Some(package.clone()),
+        Value::Array(parts) => parts.first()?.as_str().map(str::to_string),
+        Value::Object(fields) => fields.get("package")?.as_str().map(str::to_string),
+        _ => None,
+    }
+}
+
+/// The key an OpenCode config lists plugins under: the one it has, else
+/// the one the installed OpenCode reads.
+fn opencode_key(value: &Value, path: &Path) -> &'static str {
+    if let Some(key) = OPENCODE_KEYS.iter().find(|key| value.get(**key).is_some()) {
+        return key;
+    }
+    if crate::settings::local_format(path.parent().unwrap_or(Path::new("."))) == 1 {
+        "plugin"
+    } else {
+        "plugins"
+    }
 }
 
 /// Writes the pouch's plugin items into one config file.
@@ -192,11 +218,11 @@ pub fn write(
             if text.trim().is_empty() && enabled.is_empty() {
                 Ok(text.clone())
             } else {
-                crate::jsonc::set_entries(&text, "enabledPlugins", &enabled, &previous.enabled)
+                crate::jsonc::set_entries(&text, &["enabledPlugins"], &enabled, &previous.enabled)
                     .and_then(|text| {
                         crate::jsonc::set_entries(
                             &text,
-                            "extraKnownMarketplaces",
+                            &["extraKnownMarketplaces"],
                             &markets,
                             &previous.marketplaces,
                         )
@@ -204,7 +230,13 @@ pub fn write(
             }
         }
         PluginFormat::OpenCode => {
-            let (current, _) = on(path, format);
+            let (_, value) = on(path, format);
+            let key = opencode_key(&value, path);
+            let current: Vec<Value> = value
+                .get(key)
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             let wanted: BTreeSet<String> = items
                 .iter()
                 .filter_map(|item| match of(item) {
@@ -212,30 +244,33 @@ pub fn write(
                     _ => None,
                 })
                 .collect();
-            let had_list = fs::read_to_string(path).is_ok_and(|t| t.contains("\"plugin\""));
-            let mut list: Vec<String> = current
+            // Entries with options are the user's and stay as written.
+            let mut list: Vec<Value> = current
                 .iter()
-                .filter(|p| !previous.npm.contains(*p) || wanted.contains(*p))
+                .filter(|entry| {
+                    package(entry).is_none_or(|p| !previous.npm.contains(&p) || wanted.contains(&p))
+                })
                 .cloned()
                 .collect();
+            let listed: BTreeSet<String> = list.iter().filter_map(package).collect();
             // The user's own entry for the same package stays theirs.
             for package in &wanted {
-                if !list.contains(package) {
-                    list.push(package.clone());
+                if !listed.contains(package) {
+                    list.push(json!(package));
                     record.npm.insert(package.clone());
                 } else if previous.npm.contains(package) {
                     record.npm.insert(package.clone());
                 }
             }
-            if list.is_empty() && !had_list {
+            if list.is_empty() && value.get(key).is_none() {
                 Ok(text.clone())
             } else if list.is_empty()
                 && !previous.npm.is_empty()
                 && current.len() == previous.npm.len()
             {
-                crate::jsonc::set_value(&text, &["plugin"], None)
+                crate::jsonc::set_value(&text, &[key], None)
             } else {
-                crate::jsonc::set_value(&text, &["plugin"], Some(&json!(list)))
+                crate::jsonc::set_value(&text, &[key], Some(&json!(list)))
             }
         }
     };
@@ -482,6 +517,48 @@ mod tests {
         )?
         .map_err(SyncError::Invalid)?;
         assert_eq!(read(&path)["plugin"], json!(["mine"]));
+        Ok(())
+    }
+
+    #[test]
+    fn opencode_2_list_is_plugins_and_keeps_entries_with_options() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(io(Path::new(".")))?;
+        let path = dir.path().join("opencode.json");
+        let notify = json!({ "package": "opencode-notify", "options": { "sound": true } });
+        fs::write(&path, json!({ "plugins": ["mine", notify] }).to_string()).map_err(io(&path))?;
+        assert_eq!(
+            turned_on(&path, PluginFormat::OpenCode),
+            BTreeSet::from(["mine".to_string(), "opencode-notify".to_string()])
+        );
+        let waka = item(
+            "waka",
+            &[(
+                "plugin.json",
+                r#"{"name":"waka","npm":"opencode-wakatime"}"#,
+            )],
+        );
+        let record = write(&path, PluginFormat::OpenCode, &[&waka], dir.path(), None)?
+            .map_err(SyncError::Invalid)?;
+        let value = read(&path);
+        assert_eq!(
+            value["plugins"],
+            json!(["mine", notify, "opencode-wakatime"])
+        );
+        assert!(value.get("plugin").is_none());
+        write(
+            &path,
+            PluginFormat::OpenCode,
+            &[],
+            dir.path(),
+            Some(&record),
+        )?
+        .map_err(SyncError::Invalid)?;
+        assert_eq!(read(&path)["plugins"], json!(["mine", notify]));
+
+        // OpenCode 1's `[package, options]` pairs count too.
+        fs::write(&path, r#"{"plugin": [["opencode-notify", {}]]}"#).map_err(io(&path))?;
+        let found = added(&path, PluginFormat::OpenCode, None, &BTreeMap::new());
+        assert_eq!(found[0].npm.as_deref(), Some("opencode-notify"));
         Ok(())
     }
 }

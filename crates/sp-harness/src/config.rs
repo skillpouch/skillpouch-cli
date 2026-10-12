@@ -46,31 +46,42 @@ fn json_keys(text: &str, key: &str) -> Vec<String> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
         return Vec::new();
     };
-    value
-        .get(key)
-        .and_then(serde_json::Value::as_object)
-        .map(json_servers)
-        .unwrap_or_default()
+    mcp_entries(&value, key).keys().cloned().collect()
 }
 
-/// The servers in a JSON map. Some configs nest them one level deeper,
-/// under `servers`.
-fn json_servers(map: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
-    let mut names = Vec::new();
-    for (name, server) in map {
-        let Some(fields) = server.as_object() else {
-            continue;
-        };
-        let defines = ["type", "command", "url", "httpUrl", "serverUrl"]
-            .iter()
-            .any(|field| fields.contains_key(*field));
-        if name == "servers" && !defines {
-            names.extend(json_servers(fields));
-        } else {
-            names.push(name.clone());
+type Map = serde_json::Map<String, serde_json::Value>;
+
+/// The `servers` object under an assistant's MCP key, if the servers are
+/// nested one level deeper (OpenCode 2's `mcp.servers`). A server that
+/// happens to be called `servers` doesn't count.
+pub fn nested_servers(map: &Map) -> Option<&Map> {
+    let fields = map.get("servers")?.as_object()?;
+    let defines = ["type", "command", "url", "httpUrl", "serverUrl"]
+        .iter()
+        .any(|field| fields.contains_key(*field));
+    (!defines).then_some(fields)
+}
+
+/// The server entries under `key` in a parsed config, by name: the ones
+/// nested under `servers` and any written beside it.
+pub fn mcp_entries(value: &serde_json::Value, key: &str) -> Map {
+    let Some(map) = value.get(key).and_then(serde_json::Value::as_object) else {
+        return Map::new();
+    };
+    let nested = nested_servers(map);
+    let mut entries: Map = map
+        .iter()
+        .filter(|(name, server)| {
+            server.is_object() && !(nested.is_some() && name.as_str() == "servers")
+        })
+        .map(|(name, server)| (name.clone(), server.clone()))
+        .collect();
+    for (name, server) in nested.into_iter().flatten() {
+        if server.is_object() {
+            entries.insert(name.clone(), server.clone());
         }
     }
-    names
+    entries
 }
 
 fn toml_keys(text: &str, key: &str) -> Vec<String> {
@@ -178,6 +189,14 @@ mod tests {
         );
         assert_eq!(flat, ["fs"]);
         assert_eq!(nested, ["a", "b"]);
+        // Written both ways in one file, both count; values that aren't
+        // servers don't.
+        let mut both = json_keys(
+            r#"{"mcp":{"timeout":5,"old":{"command":["y"]},"servers":{"a":{}}}}"#,
+            "mcp",
+        );
+        both.sort();
+        assert_eq!(both, ["a", "old"]);
         // A server that happens to be called `servers` is still one.
         assert_eq!(
             json_keys(r#"{"mcp":{"servers":{"type":"local"}}}"#, "mcp"),

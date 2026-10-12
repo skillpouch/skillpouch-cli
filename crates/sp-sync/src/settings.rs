@@ -302,7 +302,7 @@ pub fn detect_opencode(text: &str) -> u8 {
     }
 }
 
-fn local_format(root: &Path) -> u8 {
+pub(crate) fn local_format(root: &Path) -> u8 {
     let text = ["opencode.json", "opencode.jsonc"]
         .iter()
         .find_map(|file| fs::read_to_string(root.join(file)).ok());

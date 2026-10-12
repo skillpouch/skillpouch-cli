@@ -14,7 +14,7 @@
 mod config;
 mod files;
 
-pub use config::strip_jsonc;
+pub use config::{mcp_entries, nested_servers, strip_jsonc};
 pub use files::{IGNORED_DIRS, ignored_file};
 
 use serde::{Deserialize, Serialize};
@@ -509,7 +509,8 @@ impl Places {
 pub enum McpFormat {
     /// `mcpServers`, `type` stdio/http/sse (Claude Code, Cursor, Factory).
     Claude,
-    /// `mcp`, `local` with a command array, or `remote` (OpenCode).
+    /// `mcp.servers` (`mcp` in OpenCode 1), `local` with a command array, or
+    /// `remote` (OpenCode).
     OpenCode,
     /// `[mcp_servers]` in TOML (Codex).
     Codex,
@@ -618,7 +619,8 @@ pub enum PluginFormat {
     /// `enabledPlugins` and `extraKnownMarketplaces` in `settings.json`
     /// (Claude Code, Factory).
     Claude,
-    /// npm packages in the `plugin` list of `opencode.json` (OpenCode).
+    /// npm packages in the `plugins` list of `opencode.json` (OpenCode;
+    /// `plugin` in OpenCode 1).
     OpenCode,
 }
 
