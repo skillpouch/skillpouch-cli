@@ -39,7 +39,7 @@ pub fn run(ctx: &Context, action: SettingsAction) -> Result<ExitCode> {
                     .iter()
                     .flat_map(|item| item.entries().into_keys())
                     .chain(entries.iter().flat_map(|item| {
-                        sp_sync::settings::local_entries(target.id, &target.root, item)
+                        sp_sync::settings::local_entries(target.id, &target.settings, item)
                     }))
                     .chain(
                         baseline
@@ -51,7 +51,7 @@ pub fn run(ctx: &Context, action: SettingsAction) -> Result<ExitCode> {
                     let status = if baseline.is_some_and(|state| state.excluded.contains(&key)) {
                         "excluded on this computer"
                     } else if entries.as_ref().is_some_and(|setting| {
-                        sp_sync::settings::translated_on(target.id, &target.root, setting, &key)
+                        sp_sync::settings::translated_on(target.id, &target.settings, setting, &key)
                     }) {
                         "translated"
                     } else if baseline.is_some_and(|state| state.baseline.contains_key(&key)) {
@@ -80,7 +80,7 @@ pub fn run(ctx: &Context, action: SettingsAction) -> Result<ExitCode> {
                         .iter()
                         .find(|target| target.id == harness)
                         .is_some_and(|target| {
-                            sp_sync::settings::local_entries(&harness, &target.root, item)
+                            sp_sync::settings::local_entries(&harness, &target.settings, item)
                                 .contains(&entry)
                         })
             }) {
@@ -89,7 +89,7 @@ pub fn run(ctx: &Context, action: SettingsAction) -> Result<ExitCode> {
             let root = targets
                 .iter()
                 .find(|target| target.id == harness)
-                .map(|target| target.root.clone())
+                .map(|target| target.settings.clone())
                 .ok_or_else(|| anyhow::anyhow!("assistant is not installed"))?;
             let device = state.harnesses.entry(harness.clone()).or_default();
             if exclude {

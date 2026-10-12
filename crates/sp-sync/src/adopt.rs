@@ -27,6 +27,7 @@ pub fn format_of(harness_id: &str) -> McpFormat {
         "gemini-cli" | "qwen-code" => McpFormat::Gemini,
         "copilot" => McpFormat::Copilot,
         "windsurf" | "antigravity" => McpFormat::Windsurf,
+        "crush" => McpFormat::Crush,
         _ => McpFormat::Claude,
     }
 }

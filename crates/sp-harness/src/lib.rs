@@ -35,7 +35,8 @@ pub const POUCH_KINDS: [(&str, &str); 8] = [
 ];
 
 /// User preferences only; integrations (MCP, hooks, plugins and files) have
-/// separate item kinds. Paths are relative to the assistant's root.
+/// separate item kinds. Paths are relative to the assistant's settings
+/// folder (`Target::settings`).
 pub struct SettingsFile {
     pub file: &'static str,
     pub keys: &'static [&'static str],
@@ -233,6 +234,57 @@ pub fn settings(id: &str) -> &'static [SettingsFile] {
             ],
             maps: &[],
         }],
+        // The CLI's `cli-config.json`; not `version`, the network or what it
+        // counts for itself. The editor's own settings are VS Code's.
+        "cursor" => &[SettingsFile {
+            file: "cli-config.json",
+            keys: &[
+                "model",
+                "maxMode",
+                "approvalMode",
+                "autoAcceptWebSearch",
+                "editor",
+                "display",
+                "notifications",
+                "hints",
+                "modelSlashCommands",
+                "steering",
+                "rewind",
+                "suggestNextPrompt",
+                "exploreSubagentModel",
+                "permissions",
+                "sandbox",
+                "attribution",
+            ],
+            maps: &[],
+        }],
+        // The CLI's `settings.json`; not `trustedWorkspaces` (this computer's
+        // folders) or `useG1Credits` (spending).
+        "antigravity" => &[SettingsFile {
+            file: "settings.json",
+            keys: &[
+                "colorScheme",
+                "altScreenMode",
+                "toolPermission",
+                "artifactReviewPolicy",
+                "agentMode",
+                "notifications",
+                "showTips",
+                "showFeedbackSurvey",
+                "editor",
+                "editorMode",
+                "vimInsertFirst",
+                "allowNonWorkspaceAccess",
+                "enableTerminalSandbox",
+                "enableTelemetry",
+                "verbosity",
+                "runningLightSpeed",
+                "statusLine",
+                "title",
+                "permissions",
+            ],
+            maps: &[],
+        }],
         _ => &[],
     }
 }
@@ -285,7 +337,7 @@ mod settings_tests {
     use super::*;
 
     #[test]
-    fn settings_are_only_the_eight_global_assistants() {
+    fn settings_are_every_assistant_but_windsurf() {
         for id in [
             "opencode",
             "claude-code",
@@ -295,11 +347,22 @@ mod settings_tests {
             "copilot",
             "crush",
             "factory",
+            "cursor",
+            "antigravity",
         ] {
             assert!(!settings(id).is_empty(), "{id}");
         }
-        for id in ["cursor", "windsurf", "antigravity"] {
-            assert!(settings(id).is_empty(), "{id}");
+        // Its preferences are a binary file (`~/.codeium/user_settings.pb`).
+        assert!(settings("windsurf").is_empty());
+        assert_eq!(settings("cursor")[0].file, "cli-config.json");
+        for private in ["version", "network", "hasChangedDefaultModel"] {
+            assert!(!settings("cursor")[0].keys.contains(&private), "{private}");
+        }
+        for private in ["trustedWorkspaces", "useG1Credits"] {
+            assert!(
+                !settings("antigravity")[0].keys.contains(&private),
+                "{private}"
+            );
         }
         assert!(
             settings("gemini-cli")
@@ -444,6 +507,11 @@ pub struct Places {
     pub antigravity: PathBuf,
     pub copilot: PathBuf,
     pub cursor: PathBuf,
+    /// Where Cursor's CLI keeps `cli-config.json`: `~/.cursor`, unless
+    /// `CURSOR_CONFIG_DIR` or (on Linux) `XDG_CONFIG_HOME` moves it.
+    pub cursor_config: PathBuf,
+    /// `~/.gemini/antigravity-cli`: the Antigravity CLI's own settings.
+    pub antigravity_cli: PathBuf,
     pub windsurf: PathBuf,
     pub qwen: PathBuf,
     pub factory: PathBuf,
@@ -467,6 +535,8 @@ impl Places {
             antigravity: home.join(".gemini/config"),
             copilot: home.join(".copilot"),
             cursor: home.join(".cursor"),
+            cursor_config: home.join(".cursor"),
+            antigravity_cli: home.join(".gemini/antigravity-cli"),
             windsurf: home.join(".codeium/windsurf"),
             qwen: home.join(".qwen"),
             factory: home.join(".factory"),
@@ -478,7 +548,7 @@ impl Places {
 
     /// The places under `home`, moved by the variables each assistant
     /// honours (`CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME`, `CODEX_HOME`,
-    /// `COPILOT_HOME`).
+    /// `COPILOT_HOME`, `CURSOR_CONFIG_DIR`).
     pub fn of(home: &Path, skillpouch: &Path) -> Self {
         let var = |name: &str| {
             std::env::var_os(name)
@@ -493,6 +563,12 @@ impl Places {
         if let Some(config) = var("XDG_CONFIG_HOME") {
             places.opencode = config.join("opencode");
             places.crush = config.join("crush");
+            if cfg!(target_os = "linux") {
+                places.cursor_config = config.join("cursor");
+            }
+        }
+        if let Some(dir) = var("CURSOR_CONFIG_DIR") {
+            places.cursor_config = dir;
         }
         if let Some(dir) = var("CODEX_HOME") {
             places.codex = dir;
@@ -520,13 +596,15 @@ pub enum McpFormat {
     Copilot,
     /// `mcpServers`, `serverUrl` for remote servers (Windsurf, Antigravity).
     Windsurf,
+    /// Claude's entries under `mcp` in `crush.json` (Crush).
+    Crush,
 }
 
 impl McpFormat {
     /// The key holding the servers.
     pub fn key(self) -> &'static str {
         match self {
-            Self::OpenCode => "mcp",
+            Self::OpenCode | Self::Crush => "mcp",
             Self::Codex => "mcp_servers",
             _ => "mcpServers",
         }
@@ -874,7 +952,7 @@ fn layouts(places: &Places) -> Vec<Layout> {
             agents: &[],
             commands: (&[], CommandFormat::Markdown),
             agent_format: AgentFormat::Claude,
-            mcp: None,
+            mcp: Some((vec![places.crush.join("crush.json")], McpFormat::Crush)),
             hooks: None,
             plugins: None,
         },
@@ -897,6 +975,9 @@ pub struct Target {
     pub id: &'static str,
     pub name: &'static str,
     pub root: PathBuf,
+    /// The folder its settings files are in: `root`, except for Cursor's
+    /// CLI and Antigravity's.
+    pub settings: PathBuf,
     /// The global instructions file (`CLAUDE.md`).
     pub instructions: Option<PathBuf>,
     /// One folder per skill.
@@ -956,6 +1037,11 @@ pub fn targets(places: &Places) -> Vec<Target> {
                 hooks: layout.hooks,
                 plugins,
                 read_only,
+                settings: match layout.id {
+                    "cursor" => places.cursor_config.clone(),
+                    "antigravity" => places.antigravity_cli.clone(),
+                    _ => layout.root.clone(),
+                },
                 root: layout.root,
             }
         })

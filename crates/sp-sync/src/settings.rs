@@ -372,7 +372,7 @@ pub fn files(target: &Target) -> Vec<PathBuf> {
     }
     names
         .into_iter()
-        .map(|name| target.root.join(name))
+        .map(|name| target.settings.join(name))
         .collect()
 }
 
@@ -823,8 +823,8 @@ pub fn capture(dir: &PouchDir, targets: &[Target], state: &mut DeviceState) -> R
         if sp_harness::settings(target.id).is_empty() || target.read_only.is_some() {
             continue;
         }
-        let format = (target.id == "opencode").then(|| local_format(&target.root));
-        let (local, readable) = read_local(&target.root, target.id, format);
+        let format = (target.id == "opencode").then(|| local_format(&target.settings));
+        let (local, readable) = read_local(&target.settings, target.id, format);
         let Some(previous) = items.get(&format!("setting/{}", target.id)) else {
             if state.deleted.contains(target.id) {
                 continue;
@@ -853,7 +853,7 @@ pub fn capture(dir: &PouchDir, targets: &[Target], state: &mut DeviceState) -> R
         };
         let device = state.harnesses.entry(target.id.into()).or_default();
         // Installed again between two syncs: start over, like a new computer.
-        if let (Some(before), Some(now)) = (device.folder_created, created(&target.root))
+        if let (Some(before), Some(now)) = (device.folder_created, created(&target.settings))
             && before != now
         {
             *device = HarnessState::default();
@@ -933,8 +933,8 @@ pub fn project(
         };
         let setting = Setting::from_item(item)?;
         state.deleted.remove(target.id);
-        let format = (target.id == "opencode").then(|| local_format(&target.root));
-        let (local, readable) = read_local(&target.root, target.id, format);
+        let format = (target.id == "opencode").then(|| local_format(&target.settings));
+        let (local, readable) = read_local(&target.settings, target.id, format);
         let state = state.harnesses.entry(target.id.into()).or_default();
         let mut pouch = setting.entries();
         if setting.format != format {
@@ -960,8 +960,8 @@ pub fn project(
                 state.baseline.insert(key.clone(), value.clone());
             }
         }
-        backed_up.extend(apply(&target.root, target.id, &writes, backups)?);
-        state.folder_created = created(&target.root);
+        backed_up.extend(apply(&target.settings, target.id, &writes, backups)?);
+        state.folder_created = created(&target.settings);
     }
     Ok(backed_up)
 }
@@ -1146,6 +1146,8 @@ mod tests {
             ("qwen-code", "channels"),
             ("crush", "recent_models"),
             ("factory", "enabledPlugins"),
+            ("cursor", "version"),
+            ("antigravity", "trustedWorkspaces"),
         ] {
             assert!(
                 !sp_harness::settings(id)
@@ -1154,7 +1156,6 @@ mod tests {
                 "{id}"
             );
         }
-        assert!(sp_harness::settings("cursor").is_empty());
         assert!(sp_harness::settings("windsurf").is_empty());
     }
 
@@ -1347,6 +1348,7 @@ mod tests {
             id,
             name: id,
             root: PathBuf::from(root),
+            settings: PathBuf::from(root).join("settings"),
             instructions: None,
             skills: None,
             agents: None,
@@ -1359,16 +1361,88 @@ mod tests {
         let opencode = files(&target("opencode", "/oc"));
         for name in ["opencode.json", "opencode.jsonc", "tui.json", "cli.json"] {
             assert!(
-                opencode.contains(&PathBuf::from("/oc").join(name)),
+                opencode.contains(&PathBuf::from("/oc/settings").join(name)),
                 "{name}"
             );
         }
-        assert!(files(&target("gemini-cli", "/g")).contains(&PathBuf::from("/g/.env")));
+        assert!(files(&target("gemini-cli", "/g")).contains(&PathBuf::from("/g/settings/.env")));
         assert_eq!(
             files(&target("copilot", "/c")),
-            [PathBuf::from("/c/settings.json")]
+            [PathBuf::from("/c/settings/settings.json")]
         );
-        assert!(files(&target("cursor", "/x")).is_empty());
+        assert_eq!(
+            files(&target("cursor", "/x")),
+            [PathBuf::from("/x/settings/cli-config.json")]
+        );
+        assert!(files(&target("windsurf", "/w")).is_empty());
+    }
+
+    #[test]
+    fn cursor_and_antigravity_settings_travel_from_their_cli_folders() -> Result<()> {
+        let temp = tempfile::tempdir().map_err(io(Path::new("temp")))?;
+        let write = |path: PathBuf, text: &str| -> Result<()> {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(io(parent))?;
+            }
+            fs::write(&path, text).map_err(io(&path))
+        };
+        let computer = |name: &str, color: &str, vim: bool| -> Result<Vec<Target>> {
+            let home = temp.path().join(name);
+            write(
+                home.join(".gemini/antigravity-cli/settings.json"),
+                &format!(
+                    r#"{{"colorScheme": "{color}", "trustedWorkspaces": ["/home/{name}/code"]}}"#
+                ),
+            )?;
+            write(
+                home.join(".cursor/cli-config.json"),
+                &format!(
+                    r#"{{"version": 1, "editor": {{"vimMode": {vim}}}, "permissions": {{"allow": [], "deny": []}}, "hasChangedDefaultModel": false}}"#
+                ),
+            )?;
+            fs::create_dir_all(home.join(".gemini/config")).map_err(io(&home))?;
+            Ok(sp_harness::targets(&sp_harness::Places::plain(
+                &home,
+                &home.join(".skillpouch"),
+            )))
+        };
+        let a = computer("a", "tokyo night", true)?;
+        let b = computer("b", "terminal", false)?;
+        let antigravity = a.iter().find(|target| target.id == "antigravity");
+        assert_eq!(
+            antigravity.map(|target| target.settings.clone()),
+            Some(temp.path().join("a/.gemini/antigravity-cli"))
+        );
+
+        let dir = PouchDir::new(temp.path().join("pouch"));
+        capture(&dir, &a, &mut DeviceState::default())?;
+        let items = dir.read()?.0;
+        let entries = Setting::from_item(&items["setting/antigravity"])?.entries();
+        assert_eq!(entries["settings.json:colorScheme"], json!("tokyo night"));
+        assert!(!entries.contains_key("settings.json:trustedWorkspaces"));
+        let entries = Setting::from_item(&items["setting/cursor"])?.entries();
+        assert_eq!(entries["cli-config.json:editor"], json!({"vimMode": true}));
+        assert!(!entries.contains_key("cli-config.json:version"));
+
+        project(
+            &dir,
+            &items,
+            &b,
+            &mut DeviceState::default(),
+            &temp.path().join("backups"),
+        )?;
+        let read = |path: PathBuf| -> Result<Value> {
+            let text = fs::read_to_string(&path).map_err(io(&path))?;
+            serde_json::from_str(&text).map_err(|e| invalid(e.to_string()))
+        };
+        let settings = read(temp.path().join("b/.gemini/antigravity-cli/settings.json"))?;
+        assert_eq!(settings["colorScheme"], json!("tokyo night"));
+        assert_eq!(settings["trustedWorkspaces"], json!(["/home/b/code"]));
+        let config = read(temp.path().join("b/.cursor/cli-config.json"))?;
+        assert_eq!(config["editor"]["vimMode"], json!(true));
+        assert_eq!(config["version"], json!(1));
+        assert_eq!(config["hasChangedDefaultModel"], json!(false));
+        Ok(())
     }
 
     #[test]
@@ -1401,6 +1475,7 @@ mod tests {
             id: "claude-code",
             name: "Claude",
             root: root.clone(),
+            settings: root.clone(),
             instructions: None,
             skills: None,
             agents: None,
@@ -1453,6 +1528,7 @@ mod tests {
             id: "claude-code",
             name: "Claude",
             root: root.clone(),
+            settings: root.clone(),
             instructions: None,
             skills: None,
             agents: None,
@@ -1519,6 +1595,7 @@ mod tests {
             id: "gemini-cli",
             name: "Gemini CLI",
             root: root.clone(),
+            settings: root.clone(),
             instructions: None,
             skills: None,
             agents: None,

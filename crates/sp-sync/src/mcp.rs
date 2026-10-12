@@ -79,7 +79,7 @@ pub fn from_native(format: McpFormat, name: &str, entry: &Value) -> Option<Serve
             let command = text(entry, "command")?;
             Some(local(command, strings(entry, "args"), object(entry, "env")))
         }
-        McpFormat::Claude | McpFormat::Copilot => {
+        McpFormat::Claude | McpFormat::Copilot | McpFormat::Crush => {
             if let Some(url) = text(entry, "url") {
                 let kind = if text(entry, "type").as_deref() == Some("sse") {
                     "sse"
@@ -102,7 +102,7 @@ pub fn to_native(format: McpFormat, server: &Server) -> Option<Value> {
     if let Some(url) = text(server, "url") {
         let sse = text(server, "type").as_deref() == Some("sse");
         return Some(match format {
-            McpFormat::Claude => {
+            McpFormat::Claude | McpFormat::Crush => {
                 json!({ "type": if sse { "sse" } else { "http" }, "url": url, "headers": headers })
             }
             McpFormat::OpenCode => {
@@ -127,7 +127,7 @@ pub fn to_native(format: McpFormat, server: &Server) -> Option<Value> {
             line.extend(args);
             json!({ "type": "local", "command": line, "environment": env, "enabled": true })
         }
-        McpFormat::Claude => {
+        McpFormat::Claude | McpFormat::Crush => {
             json!({ "type": "stdio", "command": command, "args": args, "env": env })
         }
         McpFormat::Copilot => {
@@ -356,6 +356,7 @@ mod tests {
             McpFormat::OpenCode,
             McpFormat::Codex,
             McpFormat::Gemini,
+            McpFormat::Crush,
         ] {
             for server in [stdio(), remote.clone()] {
                 let native = to_native(format, &server).unwrap_or_default();
@@ -372,6 +373,28 @@ mod tests {
             }
         }
         assert_eq!(to_native(McpFormat::Claude, &json!({ "name": "x" })), None);
+    }
+
+    #[test]
+    fn crush_servers_go_under_mcp_beside_its_settings() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(io(Path::new(".")))?;
+        let path = dir.path().join("crush.json");
+        fs::write(
+            &path,
+            r#"{"options":{"tui":{"compact_mode":true}},"mcp":{"mine":{"type":"http","url":"https://m"}}}"#,
+        )
+        .map_err(io(&path))?;
+        let servers = BTreeMap::from([("gh".to_string(), stdio())]);
+        write(&path, McpFormat::Crush, &servers, &BTreeSet::new())?;
+        let text = fs::read_to_string(&path).map_err(io(&path))?;
+        let value: Value =
+            serde_json::from_str(&text).map_err(|e| SyncError::Invalid(e.to_string()))?;
+        assert_eq!(value["options"]["tui"]["compact_mode"], json!(true));
+        assert_eq!(value["mcp"]["gh"]["type"], json!("stdio"));
+        assert_eq!(value["mcp"]["gh"]["command"], json!("npx"));
+        let names: Vec<_> = read(&path, McpFormat::Crush).into_keys().collect();
+        assert_eq!(names, ["gh", "mine"]);
+        Ok(())
     }
 
     #[test]

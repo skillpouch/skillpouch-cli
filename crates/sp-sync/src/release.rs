@@ -206,6 +206,7 @@ mod tests {
             id: "claude-code",
             name: "Claude Code",
             root: claude.clone(),
+            settings: claude.clone(),
             instructions: Some(claude.join("CLAUDE.md")),
             skills: Some(claude.join("skills")),
             agents: Some((claude.join("agents"), sp_harness::AgentFormat::Claude)),

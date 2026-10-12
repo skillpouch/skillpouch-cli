@@ -183,6 +183,12 @@ fn home(home: &Path, opencode_config: &str) -> std::io::Result<()> {
     let crush = home.join(".config/crush");
     write(&crush.join("CRUSH.md"), "# Rules")?;
     skill(&crush.join("skills"), "pdf")?;
+    write(
+        &crush.join("crush.json"),
+        r#"{"options": {"tui": {"compact_mode": true}},
+        "mcp": {"github": {"type": "stdio", "command": "npx", "args": ["-y", "gh-mcp"]},
+            "docs": {"type": "http", "url": "https://docs.example/mcp"}}}"#,
+    )?;
     Ok(())
 }
 
@@ -341,7 +347,12 @@ fn every_assistant_is_read_whole() -> Res {
     );
     assert_eq!(
         found["crush"],
-        items(&["instructions/instructions", "skill/pdf"])
+        items(&[
+            "instructions/instructions",
+            "mcp_server/docs",
+            "mcp_server/github",
+            "skill/pdf"
+        ])
     );
     Ok(())
 }
@@ -364,6 +375,7 @@ fn every_mcp_dialect_becomes_the_same_server() -> Res {
         "windsurf",
         "qwen-code",
         "factory",
+        "crush",
     ] {
         assert_eq!(server(home, id, "github"), gh(json!({})), "{id}");
     }
@@ -383,6 +395,7 @@ fn every_mcp_dialect_becomes_the_same_server() -> Res {
         "windsurf",
         "qwen-code",
         "factory",
+        "crush",
     ] {
         assert_eq!(
             server(home, id, "docs"),
