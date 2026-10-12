@@ -185,7 +185,7 @@ pub fn noticed(
         {
             let on = plugins::turned_on(path, *format);
             let ours = match format {
-                PluginFormat::Claude => &written.enabled,
+                PluginFormat::Claude | PluginFormat::Factory => &written.enabled,
                 PluginFormat::OpenCode => &written.npm,
             };
             for id in ours.iter().filter(|id| !on.contains(*id)) {

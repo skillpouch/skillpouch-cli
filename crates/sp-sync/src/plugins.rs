@@ -8,8 +8,9 @@
 //! ```
 //!
 //! Claude Code and Factory get `enabledPlugins` and `extraKnownMarketplaces`
-//! entries; plugin folders are offered through a `skillpouch` marketplace
-//! in the pouch's `plugins/` folder. OpenCode gets its `plugins` list
+//! entries. Claude Code gets plugin folders through a `skillpouch`
+//! marketplace in the pouch's `plugins/` folder; Droid only loads plugins
+//! it installed itself, so Factory gets their parts instead. OpenCode gets its `plugins` list
 //! (`plugin` in OpenCode 1). Each assistant installs the plugins itself.
 
 use crate::error::io;
@@ -126,7 +127,7 @@ fn on(path: &Path, format: PluginFormat) -> (BTreeSet<String>, Value) {
         .and_then(|text| serde_json::from_str(&sp_harness::strip_jsonc(&text)).ok())
         .unwrap_or_default();
     let ids = match format {
-        PluginFormat::Claude => value
+        PluginFormat::Claude | PluginFormat::Factory => value
             .get("enabledPlugins")
             .and_then(Value::as_object)
             .into_iter()
@@ -187,12 +188,12 @@ pub fn write(
     let previous = previous.cloned().unwrap_or_default();
     let mut record = PluginFile::default();
     let updated = match format {
-        PluginFormat::Claude => {
+        PluginFormat::Claude | PluginFormat::Factory => {
             let mut enabled = BTreeMap::new();
             let mut markets = BTreeMap::new();
             for item in items {
                 match of(item) {
-                    Some(Kind::Folder { plugin, .. }) => {
+                    Some(Kind::Folder { plugin, .. }) if format == PluginFormat::Claude => {
                         enabled.insert(format!("{plugin}@{MARKETPLACE}"), json!(true));
                         markets.insert(
                             MARKETPLACE.to_string(),
@@ -210,7 +211,7 @@ pub fn write(
                         }
                         enabled.insert(id, json!(true));
                     }
-                    None => {}
+                    Some(Kind::Folder { .. }) | None => {}
                 }
             }
             record.enabled = enabled.keys().cloned().collect();
@@ -335,7 +336,7 @@ pub fn added(
     ids.into_iter()
         .filter(|id| !previous.is_some_and(|file| file.seen.contains(id)))
         .filter_map(|id| match format {
-            PluginFormat::Claude => {
+            PluginFormat::Claude | PluginFormat::Factory => {
                 let (plugin, market) = split_id(&id)?;
                 if market == MARKETPLACE {
                     return None;

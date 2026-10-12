@@ -577,8 +577,8 @@ pub fn project(
     Ok((next, report))
 }
 
-/// Claude Code and Factory install plugin folders themselves; everyone else
-/// gets their parts.
+/// Claude Code installs plugin folders itself; everyone else gets their
+/// parts.
 fn installs_plugins(target: &Target) -> bool {
     matches!(target.plugins, Some((_, PluginFormat::Claude)))
 }
@@ -1090,6 +1090,103 @@ mod tests {
         let value = json_at(&gemini_settings)?;
         assert!(value["mcpServers"].get("docs").is_none(), "{value}");
         assert!(value["hooks"].get("SessionStart").is_none(), "{value}");
+        Ok(())
+    }
+
+    // Droid ignores marketplaces it didn't add itself (and rejects a
+    // `directory` source), so Factory gets a plugin folder's parts.
+    #[cfg(unix)]
+    #[test]
+    fn factory_gets_a_plugin_folders_parts_and_keeps_its_references() -> Result<()> {
+        let tmp = tempfile::tempdir().map_err(io(Path::new(".")))?;
+        let home = Home::new(tmp.path().join(".skillpouch"));
+        let pouch = home.root().join("pouches/p1");
+        let dir = crate::item::PouchDir::new(&pouch);
+        let factory = tmp.path().join(".factory");
+        fs::create_dir_all(&factory).map_err(io(&factory))?;
+        let items: BTreeMap<_, _> = [
+            item(
+                "plugin",
+                "kit",
+                &[
+                    (".claude-plugin/plugin.json", r#"{"name":"kit"}"#),
+                    ("skills/tidy/SKILL.md", "---\nname: tidy\n---\n"),
+                    (
+                        "hooks/hooks.json",
+                        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/mark.sh\""}]}]}}"#,
+                    ),
+                    (".mcp.json", r#"{"mcpServers":{"kit":{"command":"node","args":["${CLAUDE_PLUGIN_ROOT}/mcp.mjs"]}}}"#),
+                ],
+            ),
+            item(
+                "plugin",
+                "review",
+                &[(
+                    "plugin.json",
+                    r#"{"name":"review","source":"review@acme","marketplace":"acme/plugins"}"#,
+                )],
+            ),
+        ]
+        .into_iter()
+        .collect();
+        for item in items.values() {
+            dir.write_item(&item.kind, &item.name, &item.files)?;
+        }
+        set_current(&home, &pouch)?;
+        let settings = factory.join("settings.json");
+        let mcp_json = factory.join("mcp.json");
+        let factory_target = Target {
+            id: "factory",
+            name: "Factory",
+            root: factory.clone(),
+            settings: factory.clone(),
+            instructions: None,
+            skills: Some(factory.join("skills")),
+            agents: None,
+            commands: None,
+            mcp: Some((mcp_json.clone(), McpFormat::Claude)),
+            hooks: Some((settings.clone(), sp_harness::HookFormat::Claude)),
+            plugins: Some((settings.clone(), PluginFormat::Factory)),
+            read_only: None,
+        };
+        let backups = home.root().join("backups/t1");
+        let (first, report) = project(
+            &home,
+            &items,
+            &[factory_target],
+            &backups,
+            &Projection::default(),
+        )?;
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+
+        let value = json_at(&settings)?;
+        assert_eq!(
+            value["enabledPlugins"],
+            serde_json::json!({ "review@acme": true })
+        );
+        assert_eq!(
+            value["extraKnownMarketplaces"],
+            serde_json::json!({ "acme": { "source": { "source": "github", "repo": "acme/plugins" } } })
+        );
+        let root = current(&home).join("plugins/kit");
+        assert_eq!(
+            fs::read_link(factory.join("skills/tidy")).map_err(io(&factory))?,
+            root.join("skills/tidy")
+        );
+        let command = value["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            command.starts_with("export CLAUDE_PLUGIN_ROOT="),
+            "{command}"
+        );
+        assert_eq!(
+            mcp::read(&mcp_json, McpFormat::Claude)["kit"]["args"][0],
+            root.join("mcp.mjs").to_string_lossy().as_ref()
+        );
+        assert!(first.plugin_servers.contains("kit"));
+        assert!(!pouch.join("plugins/.claude-plugin").exists());
         Ok(())
     }
 

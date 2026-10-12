@@ -153,6 +153,7 @@ fn home(home: &Path, opencode_config: &str) -> std::io::Result<()> {
 
     let qwen = home.join(".qwen");
     write(&qwen.join("QWEN.md"), "# Rules")?;
+    skill(&qwen.join("skills"), "notes")?;
     write(&qwen.join("agents/reviewer.md"), AGENT)?;
     write(&qwen.join("commands/ship.toml"), TOML_COMMAND)?;
     write(
@@ -333,6 +334,8 @@ fn every_assistant_is_read_whole() -> Res {
             "instructions/instructions",
             "mcp_server/docs",
             "mcp_server/github",
+            "skill/notes",
+            "skill/shared",
         ])
     );
     assert_eq!(

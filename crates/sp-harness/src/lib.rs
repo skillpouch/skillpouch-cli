@@ -695,8 +695,12 @@ pub enum HookFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginFormat {
     /// `enabledPlugins` and `extraKnownMarketplaces` in `settings.json`
-    /// (Claude Code, Factory).
+    /// (Claude Code).
     Claude,
+    /// The same keys in Factory's `settings.json`. Droid only loads plugins
+    /// it installed itself, so plugin folders are unpacked into its folders
+    /// instead.
+    Factory,
     /// npm packages in the `plugins` list of `opencode.json` (OpenCode;
     /// `plugin` in OpenCode 1).
     OpenCode,
@@ -913,7 +917,8 @@ fn layouts(places: &Places) -> Vec<Layout> {
             root: places.qwen.clone(),
             markers: vec![],
             instructions: Some(places.qwen.join("QWEN.md")),
-            skills: vec![],
+            // Qwen Code reads both; the shared one is Codex's too.
+            skills: vec![shared_skills.clone(), places.qwen.join("skills")],
             agents: &["agents"],
             commands: (&["commands"], CommandFormat::Toml),
             agent_format: AgentFormat::Gemini,
@@ -940,7 +945,7 @@ fn layouts(places: &Places) -> Vec<Layout> {
             }),
             plugins: Some((
                 Some(places.factory.join("settings.json")),
-                PluginFormat::Claude,
+                PluginFormat::Factory,
             )),
         },
         Layout {
