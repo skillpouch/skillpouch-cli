@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: AGPL-3.0-only
-// The browser half of scripts/e2e-settings.sh: one signed-in Chromium page in
+// The browser half of scripts/e2e-settings.sh and scripts/e2e-plugins.sh: one
+// signed-in Chromium page in
 // the web app, driven one command per line on stdin, answering one line on
 // stdout. It stays open while a computer logs in, because the browser seals
 // the account keys to the new device.
@@ -12,11 +13,17 @@
 //   share <name> <s1,s2>  shares the Settings item <name>, opens the link in a
 //                         fresh browser; answers `ok <text length>` when none
 //                         of the secrets show, else `leak <secret>`
+//   write-plugin <name> <files.json>
+//                         adds plugin folder <name> written in the editor;
+//                         files.json maps each path to its text
+//   github-plugin <owner/repo>
+//                         adds the plugin in that GitHub repository
 //   quit
 //
 // Needs the web app's dependencies: SKILLPOUCH_WEB_DIR (apps/web of the
 // skillpouch repository) and its Playwright Chromium.
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -65,6 +72,77 @@ async function token() {
 
 async function connected(name) {
 	await page.getByTestId('connected-device').filter({ hasText: name }).waitFor({ timeout: 120_000 });
+	await page.keyboard.press('Escape');
+	return 'ok';
+}
+
+async function openKind(label) {
+	await page.goto(`/app/p/${pouchId}`);
+	await page
+		.getByRole('navigation')
+		.getByRole('link', { name: new RegExp(`^${label}`) })
+		.first()
+		.click();
+	await page.getByRole('heading', { level: 1, name: label }).waitFor();
+}
+
+// Typed text would meet the editor's closing brackets and indentation.
+async function fillEditor(sheet, path, text) {
+	const editor = sheet.getByLabel(`Contents of ${path}`);
+	await editor.click();
+	await page.keyboard.press('ControlOrMeta+a');
+	await page.keyboard.press('Delete');
+	await page.keyboard.insertText(text);
+}
+
+async function writePlugin(name, filesJson) {
+	const files = JSON.parse(readFileSync(filesJson, 'utf8'));
+	await openKind('Plugins');
+	await page.getByRole('button', { name: 'Add plugin' }).first().click();
+	await page.getByRole('button', { name: /Write it yourself/ }).click();
+	const sheet = page.getByRole('dialog');
+	await sheet.getByLabel('Item name').fill(name);
+	// The sheet opens on plugin.json; a new file takes the editor from it.
+	const paths = Object.keys(files).sort((a, b) => (b === 'plugin.json') - (a === 'plugin.json'));
+	for (const path of paths) {
+		const text = files[path];
+		if (path !== 'plugin.json') {
+			await sheet.getByRole('button', { name: 'New file' }).click();
+			const prompt = page.getByRole('dialog', { name: 'New file' });
+			await prompt.getByLabel('Path').fill(path);
+			await prompt.getByRole('button', { name: 'Create' }).click();
+			await prompt.waitFor({ state: 'hidden' });
+		}
+		await fillEditor(sheet, path, text);
+	}
+	await sheet.getByRole('button', { name: 'Add plugin' }).click();
+	await page.getByText('Plugin added').waitFor();
+	return 'ok';
+}
+
+async function githubPlugin(repo, plugin = repo.split('/')[1]) {
+	await openKind('Plugins');
+	await page.getByRole('button', { name: 'Add plugin' }).first().click();
+	await page.getByRole('button', { name: /From GitHub/ }).click();
+	const dialog = page.getByRole('dialog', { name: 'Add plugin from GitHub' });
+	await dialog.getByLabel('Repository', { exact: true }).fill(repo);
+	await dialog.getByRole('button', { name: 'Find' }).click();
+	// A repository with a marketplace file is added as a marketplace, and
+	// its plugin picked there, as a user would.
+	const market = dialog.getByRole('button', { name: /Add to my marketplaces/ });
+	const add = page.getByRole('button', { name: 'Add to pouch' });
+	await market.or(add).first().waitFor({ timeout: 120_000 });
+	if (await market.isVisible()) {
+		await market.click();
+		const browse = page.getByRole('dialog', { name: 'Add plugin from a marketplace' });
+		await browse
+			.getByRole('button', { name: `Add ${plugin}`, exact: true })
+			.click({ timeout: 120_000 });
+		await browse.waitFor({ state: 'hidden', timeout: 120_000 });
+	} else {
+		await add.click();
+		await page.getByRole('button', { name: 'Remove' }).waitFor({ timeout: 120_000 });
+	}
 	await page.keyboard.press('Escape');
 	return 'ok';
 }
@@ -118,12 +196,21 @@ for await (const line of createInterface({ input: process.stdin })) {
 							? await items()
 							: command === 'share'
 								? await share(args[0], args[1] ?? '')
-								: command === 'quit'
-									? null
-									: `error unknown command ${command}`;
+								: command === 'write-plugin'
+									? await writePlugin(args[0], args[1])
+									: command === 'github-plugin'
+										? await githubPlugin(args[0])
+										: command === 'quit'
+											? null
+											: `error unknown command ${command}`;
 		if (answer === null) break;
 		process.stdout.write(`${answer}\n`);
 	} catch (error) {
+		if (process.env.E2E_SHOTS) {
+			await page
+				.screenshot({ path: join(process.env.E2E_SHOTS, `${command}.png`), fullPage: true })
+				.catch(() => {});
+		}
 		process.stdout.write(`error ${String(error.message ?? error).split('\n')[0]}\n`);
 	}
 }

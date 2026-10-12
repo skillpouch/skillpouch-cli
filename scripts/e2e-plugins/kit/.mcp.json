@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "kit-mcp": { "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/mcp.mjs"] }
+  }
+}
