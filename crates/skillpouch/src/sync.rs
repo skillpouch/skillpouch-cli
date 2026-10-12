@@ -853,10 +853,9 @@ fn bring_in_new(
         // again on every sync: only names the pouch doesn't have come in.
         let read_only = sp_harness::git_checkout(&harness.root).is_some();
         found.extend(adopt::found_in(harness).into_iter().filter(|f| {
-            let ours = f
-                .origin
-                .as_ref()
-                .is_some_and(|origin| projection.copies.contains_key(origin));
+            let ours = f.origin.as_ref().is_some_and(|origin| {
+                projection.copies.contains_key(origin) || projection.plugin_parts.contains(origin)
+            });
             let key = item_key(&f.item);
             let known =
                 read_only && (existing.contains_key(&key) || projection.dismissed.contains(&key));

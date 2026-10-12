@@ -12,6 +12,7 @@
 //! that the pouch no longer needs are removed. Assistants whose folder is
 //! part of a git checkout are only read. Nothing else is touched.
 
+use crate::bundle::{self, Unpacked};
 use crate::error::io;
 use crate::hooks::{self, HookFile};
 use crate::item::{self, LocalItem};
@@ -54,6 +55,14 @@ pub struct Projection {
     /// Config file → the plugins SkillPouch turned on there.
     #[serde(default)]
     pub plugins: BTreeMap<PathBuf, PluginFile>,
+    /// Links and copies of a plugin's parts: never items of their own, so
+    /// what's found there isn't brought into the pouch.
+    #[serde(default)]
+    pub plugin_parts: BTreeSet<PathBuf>,
+    /// MCP servers that come from a plugin: an edit to one is undone, not
+    /// brought into the pouch.
+    #[serde(default)]
+    pub plugin_servers: BTreeSet<String>,
 }
 
 /// How a copy is made from its pouch file.
@@ -82,10 +91,15 @@ fn hash(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
 
-/// The item a pouch file belongs to: `…/agents/<name>/AGENT.md` → `<name>`.
+/// The item a pouch file belongs to: `…/agents/<name>/AGENT.md` → `<name>`;
+/// a plugin's `…/agents/<name>.md` → `<name>`.
 fn item_name(from: &Path) -> String {
-    from.parent()
-        .and_then(Path::file_name)
+    let named = if from.file_name().is_some_and(|file| file == "AGENT.md") {
+        from.parent().and_then(Path::file_name)
+    } else {
+        from.file_stem()
+    };
+    named
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
@@ -158,6 +172,9 @@ impl Projection {
             };
             let current = mcp::read(path, *format);
             for (name, ours) in written {
+                if self.plugin_servers.contains(name) {
+                    continue;
+                }
                 if let Some(now) = current.get(name)
                     && !same_server(now, ours)
                 {
@@ -278,16 +295,13 @@ pub fn project(
         .values()
         .filter(|item| item.kind == "instructions")
         .min_by_key(|item| item.name != item::INSTRUCTIONS);
-    let file = |to: PathBuf| {
-        if file_links {
-            Place::Link { to, dir: false }
-        } else {
-            Place::Copy {
-                from: to,
-                render: Render::Plain,
-            }
-        }
-    };
+    let file = |to: PathBuf| file_place(file_links, to);
+    let unpacked: Vec<Unpacked> = items
+        .values()
+        .filter(|item| item.kind == "plugin")
+        .filter_map(|item| bundle::unpack(item, &base.join("plugins").join(&item.name)))
+        .collect();
+    let mut part_places: Vec<(PathBuf, Place, &String)> = Vec::new();
     let writable: Vec<&Target> = targets
         .iter()
         .filter(|target| match &target.read_only {
@@ -316,46 +330,74 @@ pub fn project(
                         },
                     )
                 }),
-                "agent" => target.agents.as_ref().map(|(dir, format)| {
-                    let from = source(&base, item, "AGENT.md");
-                    let path = dir.join(format!("{}.md", item.name));
-                    match format {
-                        AgentFormat::Claude => (path, file(from)),
-                        format => (
-                            path,
-                            Place::Copy {
-                                from,
-                                render: Render::Agent(*format),
-                            },
-                        ),
-                    }
+                "agent" => target.agents.as_ref().map(|agents| {
+                    agent_place(
+                        file_links,
+                        agents,
+                        &item.name,
+                        source(&base, item, "AGENT.md"),
+                    )
                 }),
-                "command" => target.commands.as_ref().map(|(dir, format)| {
+                "command" => target.commands.as_ref().map(|commands| {
                     let from = source(&base, item, "COMMAND.md");
-                    let path = dir.join(format!("{}.{}", item.name, format.extension()));
-                    match format {
-                        CommandFormat::Markdown => (path, file(from)),
-                        CommandFormat::Toml => (
-                            path,
-                            Place::Copy {
-                                from,
-                                render: Render::TomlCommand,
-                            },
-                        ),
-                        format => (
-                            path,
-                            Place::Copy {
-                                from,
-                                render: Render::Command(*format),
-                            },
-                        ),
-                    }
+                    command_place(file_links, commands, &item.name, from)
                 }),
                 _ => None,
             };
             if let Some((path, place)) = place {
                 wanted.insert(path, place);
             }
+        }
+        if installs_plugins(target) {
+            continue;
+        }
+        for plugin in &unpacked {
+            let mut parts: Vec<(PathBuf, Place)> = Vec::new();
+            if let Some(dir) = &target.skills {
+                parts.extend(plugin.skills.iter().map(|(name, to)| {
+                    let place = Place::Link {
+                        to: to.clone(),
+                        dir: true,
+                    };
+                    (dir.join(name), place)
+                }));
+            }
+            if let Some(agents) = &target.agents {
+                parts.extend(
+                    plugin
+                        .agents
+                        .iter()
+                        .map(|(name, from)| agent_place(file_links, agents, name, from.clone())),
+                );
+            }
+            if let Some(commands) = &target.commands {
+                parts.extend(
+                    plugin.commands.iter().map(|(name, from)| {
+                        command_place(file_links, commands, name, from.clone())
+                    }),
+                );
+            }
+            part_places.extend(
+                parts
+                    .into_iter()
+                    .map(|(path, place)| (path, place, &plugin.plugin)),
+            );
+        }
+    }
+    // The pouch's own items win over a plugin's of the same name, and the
+    // first plugin over the next.
+    let mut plugin_parts = BTreeSet::new();
+    for (path, place, plugin) in part_places {
+        match wanted.get(&path) {
+            None => {
+                plugin_parts.insert(path.clone());
+                wanted.insert(path, place);
+            }
+            Some(there) if *there == place => {}
+            Some(_) => report.problems.push(format!(
+                "{}: left out of plugin {plugin}, something else of that name is already there.",
+                path.display()
+            )),
         }
     }
     for item in items.values().filter(|item| item.kind == "mcp_server") {
@@ -365,8 +407,27 @@ pub fn project(
             servers.insert(item.name.clone(), server);
         }
     }
+    let mut with_plugins = servers.clone();
+    let mut plugin_servers = BTreeSet::new();
+    for plugin in &unpacked {
+        for (name, server) in &plugin.servers {
+            if with_plugins.contains_key(name) {
+                report.problems.push(format!(
+                    "MCP server {name}: left out of plugin {}, another server has that name.",
+                    plugin.plugin
+                ));
+                continue;
+            }
+            with_plugins.insert(name.clone(), server.clone());
+            plugin_servers.insert(name.clone());
+        }
+    }
 
-    let mut next = Projection::default();
+    let mut next = Projection {
+        plugin_parts,
+        plugin_servers,
+        ..Projection::default()
+    };
     for (path, place) in &wanted {
         let placed = match place {
             Place::Link { to, dir } => place_link(home, path, to, *dir, backups).inspect(|_| {
@@ -419,7 +480,12 @@ pub fn project(
             .get(path)
             .map(|written| written.keys().cloned().collect())
             .unwrap_or_default();
-        let written = mcp::write(path, *format, &servers, &managed)?;
+        let servers = if installs_plugins(target) {
+            &servers
+        } else {
+            &with_plugins
+        };
+        let written = mcp::write(path, *format, servers, &managed)?;
         if let Some(problem) = written.skipped {
             report.problems.push(problem);
             if let Some(old) = previous.mcp.get(path) {
@@ -447,11 +513,22 @@ pub fn project(
             })
         })
         .collect();
+    let mut with_plugin_hooks = hooks_to_run.clone();
+    for hook in unpacked.iter().flat_map(|plugin| &plugin.hooks) {
+        if !with_plugin_hooks.iter().any(|have| have.same_action(hook)) {
+            with_plugin_hooks.push(hook.clone());
+        }
+    }
     for target in &writable {
         let Some((path, format)) = &target.hooks else {
             continue;
         };
-        match hooks::write(path, *format, &hooks_to_run, previous.hooks.get(path))? {
+        let hooks_to_run = if installs_plugins(target) {
+            &hooks_to_run
+        } else {
+            &with_plugin_hooks
+        };
+        match hooks::write(path, *format, hooks_to_run, previous.hooks.get(path))? {
             Ok(record) => {
                 next.hooks.insert(path.clone(), record);
             }
@@ -500,7 +577,59 @@ pub fn project(
     Ok((next, report))
 }
 
+/// Claude Code and Factory install plugin folders themselves; everyone else
+/// gets their parts.
+fn installs_plugins(target: &Target) -> bool {
+    matches!(target.plugins, Some((_, PluginFormat::Claude)))
+}
+
+fn file_place(file_links: bool, to: PathBuf) -> Place {
+    if file_links {
+        Place::Link { to, dir: false }
+    } else {
+        Place::Copy {
+            from: to,
+            render: Render::Plain,
+        }
+    }
+}
+
+fn agent_place(
+    file_links: bool,
+    (dir, format): &(PathBuf, AgentFormat),
+    name: &str,
+    from: PathBuf,
+) -> (PathBuf, Place) {
+    let path = dir.join(format!("{name}.md"));
+    match format {
+        AgentFormat::Claude => (path, file_place(file_links, from)),
+        format => (
+            path,
+            Place::Copy {
+                from,
+                render: Render::Agent(*format),
+            },
+        ),
+    }
+}
+
+fn command_place(
+    file_links: bool,
+    (dir, format): &(PathBuf, CommandFormat),
+    name: &str,
+    from: PathBuf,
+) -> (PathBuf, Place) {
+    let path = dir.join(format!("{name}.{}", format.extension()));
+    let render = match format {
+        CommandFormat::Markdown => return (path, file_place(file_links, from)),
+        CommandFormat::Toml => Render::TomlCommand,
+        format => Render::Command(*format),
+    };
+    (path, Place::Copy { from, render })
+}
+
 /// What goes at one place in an assistant's folder.
+#[derive(PartialEq)]
 enum Place {
     Link { to: PathBuf, dir: bool },
     Copy { from: PathBuf, render: Render },
@@ -783,6 +912,180 @@ mod tests {
                 .map_err(|e| SyncError::Invalid(e.to_string()))?;
         assert_eq!(value["enabledPlugins"], serde_json::json!({}));
         assert!(value["hooks"].get("PostToolUse").is_none(), "{value}");
+        Ok(())
+    }
+
+    fn json_at(path: &Path) -> Result<Value> {
+        serde_json::from_str(&fs::read_to_string(path).map_err(io(path))?)
+            .map_err(|e| SyncError::Invalid(e.to_string()))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_plugin_folder_reaches_assistants_without_plugins_in_parts() -> Result<()> {
+        let tmp = tempfile::tempdir().map_err(io(Path::new(".")))?;
+        let home = Home::new(tmp.path().join(".skillpouch"));
+        let pouch = home.root().join("pouches/p1");
+        let dir = crate::item::PouchDir::new(&pouch);
+        let claude = tmp.path().join(".claude");
+        let opencode = tmp.path().join(".config/opencode");
+        let gemini = tmp.path().join(".gemini");
+        for folder in [&claude, &opencode, &gemini] {
+            fs::create_dir_all(folder).map_err(io(folder))?;
+        }
+        let items: BTreeMap<_, _> = [
+            item(
+                "plugin",
+                "ponytail",
+                &[
+                    (
+                        ".claude-plugin/plugin.json",
+                        r#"{"name":"ponytail","hooks":"./hooks/claude.json"}"#,
+                    ),
+                    ("skills/lazy/SKILL.md", "---\nname: lazy\n---\nfrom the plugin"),
+                    ("skills/terse/SKILL.md", "---\nname: terse\n---\n"),
+                    (
+                        "agents/reviewer.md",
+                        "---\nname: reviewer\ndescription: Reviews\ntools: Read, Grep\n---\nReview.",
+                    ),
+                    ("commands/simplify.md", "---\ndescription: Simplify\n---\nSimplify $ARGUMENTS"),
+                    (
+                        "hooks/claude.json",
+                        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"node \"${CLAUDE_PLUGIN_ROOT}/hooks/start.js\"","timeout":5}]}]}}"#,
+                    ),
+                    ("hooks/start.js", "console.log('hi')"),
+                    (".mcp.json", r#"{"mcpServers":{"docs":{"type":"http","url":"https://x/mcp"}}}"#),
+                ],
+            ),
+            item("skill", "lazy", &[("SKILL.md", "---\nname: lazy\n---\nthe pouch's own")]),
+        ]
+        .into_iter()
+        .collect();
+        for item in items.values() {
+            dir.write_item(&item.kind, &item.name, &item.files)?;
+        }
+        set_current(&home, &pouch)?;
+        let settings = claude.join("settings.json");
+        let mut claude_target = target(&claude, &tmp.path().join(".claude.json"));
+        claude_target.hooks = Some((settings.clone(), sp_harness::HookFormat::Claude));
+        claude_target.plugins = Some((settings.clone(), PluginFormat::Claude));
+        let opencode_json = opencode.join("opencode.json");
+        let opencode_target = Target {
+            id: "opencode",
+            name: "OpenCode",
+            root: opencode.clone(),
+            instructions: None,
+            skills: Some(opencode.join("skills")),
+            agents: Some((opencode.join("agents"), AgentFormat::OpenCode)),
+            commands: Some((opencode.join("commands"), CommandFormat::OpenCode)),
+            mcp: Some((opencode_json.clone(), McpFormat::OpenCode)),
+            hooks: None,
+            plugins: Some((opencode_json.clone(), PluginFormat::OpenCode)),
+            read_only: None,
+        };
+        let gemini_settings = gemini.join("settings.json");
+        let gemini_target = Target {
+            id: "gemini-cli",
+            name: "Gemini CLI",
+            root: gemini.clone(),
+            instructions: None,
+            skills: None,
+            agents: None,
+            commands: Some((gemini.join("commands"), CommandFormat::Toml)),
+            mcp: Some((gemini_settings.clone(), McpFormat::Gemini)),
+            hooks: Some((gemini_settings.clone(), sp_harness::HookFormat::Gemini)),
+            plugins: None,
+            read_only: None,
+        };
+        let targets = [claude_target, opencode_target, gemini_target];
+        let backups = home.root().join("backups/t1");
+        let (first, report) = project(&home, &items, &targets, &backups, &Projection::default())?;
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+        assert!(
+            report.problems[0].contains("skills/lazy: left out of plugin ponytail"),
+            "{:?}",
+            report.problems
+        );
+        assert!(first.plugin_parts.contains(&opencode.join("skills/terse")));
+        assert!(
+            first
+                .plugin_parts
+                .contains(&gemini.join("commands/simplify.toml"))
+        );
+        assert!(!first.plugin_parts.contains(&opencode.join("skills/lazy")));
+        assert_eq!(first.plugin_servers, BTreeSet::from(["docs".to_string()]));
+
+        // Claude Code installs the plugin itself and gets none of its parts.
+        assert_eq!(
+            json_at(&settings)?["enabledPlugins"]["ponytail@skillpouch"],
+            true
+        );
+        assert!(json_at(&settings)?.get("hooks").is_none());
+        assert!(!claude.join("skills/terse").exists());
+        assert!(!claude.join("agents/reviewer.md").exists());
+
+        // OpenCode gets every part in its own dialect.
+        let root = current(&home).join("plugins/ponytail");
+        assert_eq!(
+            fs::read_link(opencode.join("skills/terse")).map_err(io(&opencode))?,
+            root.join("skills/terse")
+        );
+        // A pouch skill of the same name wins.
+        assert_eq!(
+            fs::read_link(opencode.join("skills/lazy")).map_err(io(&opencode))?,
+            current(&home).join("skills/lazy")
+        );
+        let agent = opencode.join("agents/reviewer.md");
+        let agent = fs::read_to_string(&agent).map_err(io(&agent))?;
+        assert!(agent.contains("mode: subagent"), "{agent}");
+        assert!(opencode.join("commands/simplify.md").exists());
+        assert_eq!(
+            mcp::read(&opencode_json, McpFormat::OpenCode)["docs"]["url"],
+            "https://x/mcp"
+        );
+
+        // Gemini CLI: a TOML command, the MCP server and the hook with the
+        // plugin's folder filled in.
+        let toml = gemini.join("commands/simplify.toml");
+        let toml = fs::read_to_string(&toml).map_err(io(&toml))?;
+        assert!(toml.contains("{{args}}"), "{toml}");
+        let value = json_at(&gemini_settings)?;
+        assert_eq!(value["mcpServers"]["docs"]["httpUrl"], "https://x/mcp");
+        let command = value["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(
+            command,
+            format!(
+                "export CLAUDE_PLUGIN_ROOT='{}'; node \"${{CLAUDE_PLUGIN_ROOT}}/hooks/start.js\"",
+                root.display()
+            )
+        );
+
+        // A plugin's server edited by hand isn't the user's own server.
+        let text = fs::read_to_string(&gemini_settings).map_err(io(&gemini_settings))?;
+        fs::write(
+            &gemini_settings,
+            text.replace("https://x/mcp", "https://y/mcp"),
+        )
+        .map_err(io(&gemini_settings))?;
+        assert!(first.edited_servers(&targets).is_empty());
+
+        // Taken out of the pouch: every part goes too.
+        let rest: BTreeMap<_, _> = items
+            .into_iter()
+            .filter(|(_, item)| item.kind != "plugin")
+            .collect();
+        let (_, report) = project(&home, &rest, &targets, &backups, &first)?;
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        assert!(fs::symlink_metadata(opencode.join("skills/terse")).is_err());
+        assert!(!opencode.join("agents/reviewer.md").exists());
+        assert!(!gemini.join("commands/simplify.toml").exists());
+        assert!(mcp::read(&opencode_json, McpFormat::OpenCode).is_empty());
+        let value = json_at(&gemini_settings)?;
+        assert!(value["mcpServers"].get("docs").is_none(), "{value}");
+        assert!(value["hooks"].get("SessionStart").is_none(), "{value}");
         Ok(())
     }
 

@@ -11,6 +11,7 @@
 //! Each hook becomes one entry in the assistant's list for that event, so
 //! SkillPouch can tell its entries from the user's and change only its own.
 
+use crate::bundle::{ROOT_VARIABLE, is_part};
 use crate::error::io;
 use crate::{Result, SyncError};
 use serde::{Deserialize, Serialize};
@@ -470,6 +471,26 @@ pub fn write(
     let mut record = HookFile::default();
     for event in &events {
         let mut list = current.get(event).cloned().unwrap_or_default();
+        // A plugin's hook edited in place goes back to what the plugin says:
+        // kept, the edit would run beside it and outlive the plugin. An edit
+        // keeps the `CLAUDE_PLUGIN_ROOT` it was given; the user's own hooks,
+        // new or edited, don't have it and stay.
+        let mut edited = previous
+            .into_iter()
+            .flat_map(|file| &file.written)
+            .filter(|w| &w.event == event && is_part(&w.name) && !list.contains(&w.entry))
+            .count();
+        let seen = previous.and_then(|file| file.seen.get(event));
+        list.retain(|entry| {
+            let new = !seen.is_some_and(|seen| seen.contains(entry));
+            let drop = edited > 0
+                && new
+                && from_native(format, event, entry)
+                    .iter()
+                    .any(|hook| hook.command.contains(ROOT_VARIABLE));
+            edited -= usize::from(drop);
+            !drop
+        });
         for old in previous
             .into_iter()
             .flat_map(|file| &file.written)
@@ -789,6 +810,75 @@ mod tests {
         assert_eq!(value["hooks"]["PostToolUse"][0]["timeoutSec"], 30);
         write(&path, HookFormat::Copilot, &[], Some(&record))?.map_err(SyncError::Invalid)?;
         assert!(!path.exists());
+        Ok(())
+    }
+
+    fn plugin_hook() -> Hook {
+        Hook {
+            name: "ponytail:posttooluse:1".into(),
+            command: "export CLAUDE_PLUGIN_ROOT='/p'; node \"$CLAUDE_PLUGIN_ROOT/fmt.js\"".into(),
+            ..format_hook()
+        }
+    }
+
+    fn commands(path: &Path) -> Vec<String> {
+        read(path, HookFormat::Claude)
+            .get("PostToolUse")
+            .into_iter()
+            .flatten()
+            .flat_map(|entry| from_native(HookFormat::Claude, "PostToolUse", entry))
+            .map(|hook| hook.command)
+            .collect()
+    }
+
+    fn edit(path: &Path, from: &str, to: &str) -> Result<()> {
+        let text = fs::read_to_string(path).map_err(io(path))?;
+        fs::write(path, text.replace(from, to)).map_err(io(path))
+    }
+
+    #[test]
+    fn a_plugins_hook_edited_by_hand_goes_back_to_the_plugins() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(io(Path::new(".")))?;
+        let path = dir.path().join("settings.json");
+        let hooks = [format_hook(), plugin_hook()];
+        let first = write(&path, HookFormat::Claude, &hooks, None)?.map_err(SyncError::Invalid)?;
+        // Both edited: the user's own hook and the plugin's.
+        edit(&path, "prettier --write .", "prettier --check .")?;
+        edit(&path, "fmt.js", "lint.js")?;
+
+        write(&path, HookFormat::Claude, &hooks, Some(&first))?.map_err(SyncError::Invalid)?;
+        let now = commands(&path);
+        assert!(now.contains(&"prettier --check .".to_string()), "{now:?}");
+        assert!(
+            !now.iter().any(|command| command.contains("lint.js")),
+            "{now:?}"
+        );
+        let plugin = now
+            .iter()
+            .filter(|command| command.contains("fmt.js"))
+            .count();
+        assert_eq!(plugin, 1, "{now:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_hook_added_while_a_plugins_went_stays() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(io(Path::new(".")))?;
+        let path = dir.path().join("settings.json");
+        let first = write(&path, HookFormat::Claude, &[plugin_hook()], None)?
+            .map_err(SyncError::Invalid)?;
+        edit(
+            &path,
+            &plugin_hook().command.replace('"', "\\\""),
+            "eslint --fix .",
+        )?;
+        assert_eq!(commands(&path), ["eslint --fix ."]);
+
+        write(&path, HookFormat::Claude, &[plugin_hook()], Some(&first))?
+            .map_err(SyncError::Invalid)?;
+        let now = commands(&path);
+        assert!(now.contains(&"eslint --fix .".to_string()), "{now:?}");
+        assert!(now.contains(&plugin_hook().command), "{now:?}");
         Ok(())
     }
 

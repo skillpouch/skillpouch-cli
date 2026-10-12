@@ -217,12 +217,17 @@ pub fn noticed(
 }
 
 /// The pouch item a link or copy points into: `<base>/<folder>/<name>/…`.
+/// A plugin's part (`<base>/plugins/<name>/skills/x`) isn't an item: losing
+/// it in one assistant doesn't take the whole plugin out of the pouch.
 fn item_of(base: &Path, to: &Path) -> Option<(String, String)> {
     let mut parts = to.strip_prefix(base).ok()?.components();
     let folder = parts.next()?.as_os_str().to_str()?;
     let name = parts.next()?.as_os_str().to_str()?;
-    let kind = item::KINDS.iter().find(|kind| kind.1 == folder)?.0;
-    Some((kind.to_string(), name.to_string()))
+    let (kind, _, main) = item::KINDS.iter().find(|kind| kind.1 == folder)?;
+    match parts.next() {
+        Some(file) if file.as_os_str() != *main || parts.next().is_some() => None,
+        _ => Some((kind.to_string(), name.to_string())),
+    }
 }
 
 /// What is at `path` now, as the item's files: a whole folder for a skill,
@@ -275,6 +280,20 @@ mod tests {
     use crate::error::io;
     use crate::project::{project, set_current};
     use sp_harness::CommandFormat;
+
+    #[test]
+    fn a_plugins_parts_are_not_items() {
+        let base = Path::new("/sp/current");
+        let of = |to: &str| item_of(base, &base.join(to));
+        assert_eq!(of("skills/pdf"), Some(("skill".into(), "pdf".into())));
+        assert_eq!(
+            of("agents/reviewer/AGENT.md"),
+            Some(("agent".into(), "reviewer".into()))
+        );
+        assert_eq!(of("plugins/ponytail/skills/terse"), None);
+        assert_eq!(of("plugins/ponytail/agents/reviewer.md"), None);
+        assert_eq!(of("skills/pdf/notes/ref.md"), None);
+    }
 
     struct Setup {
         _tmp: tempfile::TempDir,
