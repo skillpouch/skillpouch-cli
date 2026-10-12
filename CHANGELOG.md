@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.1](https://github.com/skillpouch/skillpouch-cli/compare/v0.5.0...v0.5.1) (2026-10-12)
+
+### Bug fixes
+
+* **sync:** bring in OpenCode 2 MCP servers and plugins ([c8b9ad2](https://github.com/skillpouch/skillpouch-cli/commit/c8b9ad2dd84c0b8f34cc5764bd9059b7657059ac))
+
 ## [0.5.0](https://github.com/skillpouch/skillpouch-cli/compare/v0.4.1...v0.5.0) (2026-10-11)
 
 ### Features
