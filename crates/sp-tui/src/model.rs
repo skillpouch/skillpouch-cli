@@ -166,7 +166,7 @@ pub enum Request {
     },
     /// Make this pouch the one this computer syncs.
     UsePouch(String),
-    /// Open a web app path (`/app/account`) in the browser.
+    /// Open a web app path (`/account`) in the browser.
     Open(String),
     /// Look at this computer's assistants and set it up.
     Setup,

@@ -137,7 +137,7 @@ mod tests {
         status.conflicts = 2;
         let (title, body) = news(&mut status, "https://x").unwrap_or_default();
         assert_eq!(title, "SkillPouch: 2 items changed in two places");
-        assert!(body.ends_with("https://x/app/p/p1/conflicts"), "{body}");
+        assert!(body.ends_with("https://x/pouches/p1/conflicts"), "{body}");
         assert_eq!(news(&mut status, "https://x"), None);
         // Resolved, then a new one: told again.
         status.conflicts = 0;

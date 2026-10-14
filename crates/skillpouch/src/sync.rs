@@ -180,7 +180,7 @@ fn backups_dir(ctx: &Context) -> PathBuf {
 
 /// Where the web app resolves a pouch's conflicts.
 pub fn conflicts_path(pouch_id: &str) -> String {
-    format!("/app/p/{pouch_id}/conflicts")
+    format!("/pouches/{pouch_id}/conflicts")
 }
 
 /// `1 item`, `3 items`.

@@ -29,7 +29,7 @@ pub async fn forget(ctx: &Context, credentials: Credentials) -> Result<()> {
     if !revoked {
         ui::warn(format!(
             "Couldn't reach the server. Remove this computer on your Devices page: {}",
-            ui::accent(format!("{}/app/account/devices", credentials.api_url))
+            ui::accent(format!("{}/account/devices", credentials.api_url))
         ));
     }
     Ok(())

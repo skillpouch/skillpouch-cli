@@ -350,15 +350,15 @@ impl App {
     /// Where `o` goes from the current tab.
     fn web_path(&self) -> String {
         match self.tab {
-            Tab::Overview => "/app".into(),
-            Tab::Usage => "/app/account/usage".into(),
+            Tab::Overview => "/pouches".into(),
+            Tab::Usage => "/account/usage".into(),
             Tab::Pouches => self
                 .dashboard()
                 .and_then(|d| d.pouches.get(self.cursor(Tab::Pouches)))
-                .map_or("/app".into(), |pouch| format!("/app/p/{}", pouch.id)),
-            Tab::Sync => "/app".into(),
-            Tab::Computers => "/app/account/devices".into(),
-            Tab::Account => "/app/account".into(),
+                .map_or("/pouches".into(), |pouch| format!("/pouches/{}", pouch.id)),
+            Tab::Sync => "/pouches".into(),
+            Tab::Computers => "/account/devices".into(),
+            Tab::Account => "/account".into(),
         }
     }
 
@@ -496,8 +496,8 @@ impl App {
             KeyCode::Enter if self.tab == Tab::Account => {
                 match AccountAction::ALL.get(self.cursor(Tab::Account)) {
                     Some(AccountAction::SetUp) => Outcome::Send(Request::Setup),
-                    Some(AccountAction::OpenAccount) => self.open("/app/account"),
-                    Some(AccountAction::OpenBilling) => self.open("/app/account/billing"),
+                    Some(AccountAction::OpenAccount) => self.open("/account"),
+                    Some(AccountAction::OpenBilling) => self.open("/account/billing"),
                     Some(AccountAction::Logout) => {
                         self.confirm_logout = true;
                         Outcome::Nothing
@@ -760,7 +760,7 @@ pub(crate) mod tests {
         assert_eq!(
             press(&mut app, KeyCode::Char('o')),
             Outcome::Send(Request::Open(
-                "https://app.skillpouch.net/app/p/0193ab12-0000-7000-8000-000000000002".into()
+                "https://app.skillpouch.net/pouches/0193ab12-0000-7000-8000-000000000002".into()
             ))
         );
     }

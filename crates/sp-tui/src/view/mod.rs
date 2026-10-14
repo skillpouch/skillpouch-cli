@@ -335,7 +335,7 @@ pub(crate) mod tests {
             detail: Some(
                 "1 item changed in two places: press c to pick versions in the web app".into(),
             ),
-            conflicts: Some("/app/p/p1/conflicts".into()),
+            conflicts: Some("/pouches/p1/conflicts".into()),
         })));
         contains_all(
             &screen(&app, 120, 40),
@@ -344,7 +344,7 @@ pub(crate) mod tests {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
         assert!(matches!(
             app.on_key(key),
-            crate::app::Outcome::Send(crate::model::Request::Open(url)) if url == "https://app.skillpouch.net/app/p/p1/conflicts"
+            crate::app::Outcome::Send(crate::model::Request::Open(url)) if url == "https://app.skillpouch.net/pouches/p1/conflicts"
         ));
     }
 
