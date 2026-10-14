@@ -12,7 +12,7 @@
 # a mock provider (scripts/e2e-settings/mock-llm.mjs) that records the key
 # and model each assistant sends: proof that the CLI accepted the settings.
 #
-# Needs Docker and the skillpouch repository next to this one (or
+# Needs Docker and the app repository next to this one (skillpouch-app or skillpouch, or
 # SKILLPOUCH_REPO) with `pnpm install` done, Playwright's Chromium and the
 # test Postgres (`skillpouch-pg-test`, see its AGENTS.md). Ports:
 # E2E_API_PORT (18181), E2E_WEB_PORT (15181), E2E_MOCK_PORT (4999). Logs and
@@ -22,7 +22,10 @@ trap 'echo "failed at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cli="$(dirname "$here")"
-repo="${SKILLPOUCH_REPO:-$(dirname "$cli")/skillpouch}"
+# The app repo checked out next to this one, as skillpouch-app or skillpouch.
+parent="$(dirname "$cli")"
+[ -d "$parent/skillpouch-app" ] && default_repo="$parent/skillpouch-app" || default_repo="$parent/skillpouch"
+repo="${SKILLPOUCH_REPO:-$default_repo}"
 api_port="${E2E_API_PORT:-18181}"
 web_port="${E2E_WEB_PORT:-15181}"
 mock_port="${E2E_MOCK_PORT:-4999}"
