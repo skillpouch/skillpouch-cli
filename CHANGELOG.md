@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.2](https://github.com/skillpouch/skillpouch-cli/compare/v0.5.1...v0.5.2) (2026-10-14)
+
+### Bug fixes
+
+* **tui:** open web app pages at /pouches and /account ([64a93c3](https://github.com/skillpouch/skillpouch-cli/commit/64a93c38f61bd0d129b8f6fa5dd20e492d385322))
+
 ## [0.5.1](https://github.com/skillpouch/skillpouch-cli/compare/v0.5.0...v0.5.1) (2026-10-12)
 
 ### Bug fixes
